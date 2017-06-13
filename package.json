@@ -7,7 +7,7 @@
   "author": "Samy Pesse <samypesse@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/SamyPesse/gitkit.js.git"
+    "url": "https://github.com/MatrixAI/node-git"
   },
   "dependencies": {
     "axios": "^0.9.1",
@@ -22,7 +22,7 @@
     "ignore": "^3.1.1",
     "immutable": "^3.7.6",
     "is": "^3.1.0",
-    "memory-fs": "^0.3.0",
+    "memory-fs": "git+https://github.com/MatrixAI/memory-fs.git",
     "mkdir": "0.0.2",
     "pad": "^1.0.0",
     "pako": "^1.0.1",
