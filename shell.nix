@@ -2,5 +2,18 @@
   with pkgs;
   stdenv.mkDerivation {
     name = "js-virtualgit";
-    buildInputs = [ emscripten python2 nodejs nodePackages.node2nix flow ];
+    buildInputs = [
+      emscripten
+      cmake
+      pkgconfig
+      libssh2
+      zlib
+      openssl
+      curl
+      http-parser
+      python2
+      nodejs
+      nodePackages.node2nix
+      flow
+    ];
   }
