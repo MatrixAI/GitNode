@@ -201,3 +201,176 @@ Ok so you can choose to allocate onto the heap, and then free it later on, `_fre
 http://kapadia.github.io/emscripten/2013/09/13/emscripten-pointers-and-pointers.html
 
 What about returning inline structs!?
+
+---
+
+I think the main idea will be to compile libgit2 (preferably with dynamic linking enabled) and its dependencies independnetly, and create JS wrappers around the calls, and then expose the end result as a cjs or es6 module.
+
+So to do this, we should have the base modules available as separate emscripten packages.
+
+The end result is that Nix shell can join it all together as separate emscripten packages, and we build a complete js package. That is statically linked together in the end. (Or left for dynamic linking). Not completely sure.
+
+So we need to understand how the cmake works and then see how to integrate that.
+
+---
+
+CMake uses the file `CMakeLists.txt`. The main commands to use are:
+
+```
+mkdir -p build && \
+cmake ./path/to/src && \
+cmake --build .
+```
+
+So that's simple enough, the first command generates the build files according to some settings, it's kind of like configure. While `cmake --build` is like `make`. But I don't know what is the equivalent to `make install`.
+
+The language is like C macros.
+
+```
+PROJECT(libgit2 C)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
+SET()
+```
+
+The set command sets variables up. Common variables are like:
+
+```
+SET(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR/bin})
+SET(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
+SET(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR})
+```
+
+So here the `CMAKE_BINARY_DIR` means that if you are building in-source, this is the same as the `CMAKE_SOURCE_DIR`. It's the top level directory of your build tree. While `CMAKE_SOURCE_DIR` is the directory where the `CMakeLists.txt` was found. A key feature of cmake is the ability to make multiple builds from a single source tree. Unlike autotools which appears to prefer building within the source tree and creating lots of junk. This is something that's expected for most modern build systems now.
+
+So if you're building within the same source, then both variables should point to the same place.
+
+So apparently others just used the cmakelists file but overrode some variables like:
+
+```
+cmake .. \
+  -DCMAKE_SIZEOF_VOID_P=4 \
+  -DCMAKE_C_COMPILER="emcc" \
+  -DCMAKE_AR="emar" \
+  -DCMAKE_RANLIB="emranlib" \
+  -DCMAKE_C_FLAGS="-s LINKABLE=1" \
+```
+
+So the `-s LINKABLE=1 -s EXPORT_ALL=1` would make the system export ALL functions including libc functions. I think this is a bad idea, and we don't need this. But we do need to define functions to be kept, which should be everything exported by libgit2. But there's a whole lot of functions!?
+
+So perhaps we should use exported function list according to the libgit2 version, we're going wrap the thing in JS anyway. Remember we still need a JS wrapper that mediates all the calls, so since we are going to specify all of this, then this means the list of functions will have to be listed in our own cmake lists, and in the js wrapper. I don't think we should be exporting all of it, also we cannot use the emscripten macro, because we are not writing direct C.
+
+Apparently we can mount a VFS instead of having to write the wrappers:
+
+```
+const vfs = new VirtualEmscriptenFS;
+Module.FS.mount(vfs, {root: '/'}, '/');
+```
+
+We just need to match the interface assumed by `mount`
+
+So emscripten decides automatically whether to include FS support. Many programs don't need files, so that is not installed. However it will normally JUST work. However to force inclusion, you will have to set `-s FORCE_FILESYSTEM=1`. When I do this with my simple program, all I get are extra functions, but not the FS module in itself.
+
+Oh no this doesn't actually work, firstly emscripten doesn't allow mounting at root. Furthermore the FS object isn't accessible to JS after compiling. Instead you just have to state the FS mounting code in your main.c, but I do not have a main.c!! What the hell. See this issue for more: https://github.com/kripken/emscripten/issues/2040 Ok instead of doing this, we just have to use the ODB and REFDB. But if we don't implement that in C, then how do we do it? Maybe we can compile the 2 and link them together? That is compile libgit2 and export a whole bunch as JS?
+
+Maybe we can just use git2.h, everything there should be exported as that provides the types for everything!
+
+https://github.com/libgit2/libgit2/blob/master/include/git2.h
+
+Why can't emscripten traverse the headers here and export everything these headers export?
+
+Exporting the functions is not so simple!!!
+
+The other issue is ports vs emscripten-packages vs statically building from the provided source from cmake. For example we have 4 sources of zlib available to us:
+
+1. Nixpkgs zlib
+2. Nixpkgs emscripten-packages zlib
+3. -s USE_ZLIB emscripten port
+4. libgit2 embedded zlib
+
+Apparently the flag will perform a network based download of the port, that may not be desired, since we can make use of nixpkgs to supply the port, but at the same time, during development, this may be better, but only when packaging for nixos, should we then set it to use the zlib from emscripten-packages, which requires disabling this flag in the default.nix. One problem with this, is that how does this interact with the cmake flags, like how do we then make sure that it finds the correct zlib. Last time I did a native build, it autodetected zlib was available from nixpkgs, and just used that instead of the embedded zlib. It was done via cmake `FIND_PACKAGE` command. So if we were to use the emscripten ports system, it would have to be able to disable the find package command or override it so it used the zlib port instead of its natural way of finding packages in the current shell environment.
+
+The docs say that if you use the ports, the emcc will fetch it remotely, set it up and build it locally, link with the project, add the necesssary includes to the build commands. (Of course if we rewrite the cmakelists, then we can disable the usage of zlib like that).
+
+There's a command called `emcmake` that apparently configures cmake to target emscripten directly. I wonder how it deals with things like `FIND_PACKAGE`. It appears it all it does is perform the configure command, which is quite strange.
+
+According to the docs here's how you would build together 2 C projects and statically link them together:
+
+```
+cd /libstuff
+emconfigure ./configure
+emmake make
+
+cd /project
+emconfigure ./configure
+emmake make
+
+emcc /project/project.bc /libstuff/libstuff.bc -o final.js
+
+# or
+
+emcc /project/project.bc /libstuff/libstuff.bc -o allproject.bc
+
+emcc allproject.bc -o final.js
+```
+
+So yea each project can be individually compiled and then brought together into 1 system. But if you wanted to modularise them as dependencies, you have to consider how to setup C dependencies, which are usually based on dynamic linking. But C can also statically link to shared objects. Oh apparently you cannot. You need a static library to do the linking either `.a` or `.o`. A shared library `.so` is actually an executable in a special format with entry points specified. It does not have all the information needed to link statically. So you cannot statically link a shared library nor can you dynamically link a static library (I suppose you can bundle libraries together though at a different level of abstraction (statifier, ermine, container image, virtual machine)). Using the `-static` flag, it will pick the `.a` library over the `.so` but static libraries are not always installed by default. I wonder if most nixpkgs packages supply both the shared object and the static archive. Note that `.o` is not the same as `.a` but `.a` can represent a bundle of `.o`. Note that you can however convert a static library to a shared object, this uses the `--whole-archive` option, which can contain a static library in a shared object. Oh so most libraries on nixpkgs are distributed without static archives, they usually only contain shared objects. I just checked with curl and libssh2 brought in via nixpkgs.
+
+However, the reason for this is most of the time you don't need the static archive, so they kept this out of the main store path. In fact there's a flag called `dontDisableStatic` which is part of the configure phase, this means that by default Nix uses `--disable-static` setting so that the resulting build doesn't produce the static archive. By default according to autotools (specifically the activation of libtool), the shared and static versions should be built, but one or the other can be disabled. So there's also `--disable-shared` as well.
+
+So I see that this means it would be nice to have a package hook for nixpkgs specifically for emscripten packages that deals with bc or bitcode output. Since that is generally considered the universal object format for emscripten, so emscripten doesn't deal with `.a` or `.so` but just with `.bc`. Actually according to the docs, it's possible that the make file from emmake may decide to emit `.so` or `.a`, but it's best to try to emit only `.bc` to avoid confusion. In fact we should make sure that emscripten-packages are being used.
+
+Ah so that makes sense then, of course there wouldn't be 2 different object formats for emscripten. There's only really `.bc` and `.js`, with `.js` representing the final executable. However the key point is that there's no such thing as compile time dynamic linking on emscripten, because there's no filesystem that you just libraries upon program load. Instead you always generate `.bc` until you generate the final `.js`. It's just that it is possible for 2 or more `.js` outputs to communicate with each other. Thus that's basically emscripten's form of dynamic linking, basically having multiple `.js` asm modules, loaded into the browser or required in nodejs, to communicate with each other. However I'm not sure whether dynamic linking is still completely figured out in fastcomp version!
+
+But if it worked, then static linking for libgit2 would look like compiling all the other dependencies into `.bc` files. Adding those into an environment hook in nixpkgs (emscripten would have a package hook). Then using emscripten to compile the current package into `.bc` as well or into `.js`. You would make this produce a `.bc` if you wanted this to available later to other systems and be part of the emscripten packages. Or you produce the `.js` if this is the final executable. Whereas for dynamic linking, you would produce the `.js` for each library. Finally here you would also produce a `.js` which somehow calls into the other `.js` files and expects them to be there when running in the browser or nodejs somehow. And you can use the `--save-bc` to essentially also produce the `.bc` while producing the `.js`. While using the `-c` will always force the production of `.bc` instead of `.js`. It makes sense, in the compilation vs the linking phase.
+
+Oh I just found that there's also `-s EXPORTED_GLOBALS` which has global non-variable functions that are explicitly exported. This is important for non-functions like variables. But what about constants?
+
+Since we're dealing with crypto we may need `-s PRECISE_I64_MATH=2` and `-s PRECISE_F32=1`. This will slow it down but will be precise.
+
+You can also `-S FORCE_ALIGNED_MEMORY=1` and see if it all works, this should be true for good proper C code.
+
+So you cannot load the C header into JS, and make use of it's constants and stuff directly in JS. Instead you either have to manually translate all of header into relevant object contants and properties exported by your own JS code, so that downstream systems can access these properties. Damn I was really hoping emscripten would have a solution to processing the header exports. It seems while there is not documentation on exporting non-functions from C to javascript, there is docs on exporting non-functions from C++ to JS using embind. That's weird, I wonder if I can use embind for C as well. There's stuff on constants and structs and stuff there!
+
+Also try `-s MODULARIZE=1`, even though this shouldn't matter because we're going to use rollup to bundle it all together.
+
+So above I had talked about the FS mounting problem, being that 1. I cannot remount root, and 2. I cannot access the FS object outside of emscripten. But number 2 maybe solved with `--pre-js` but I'm not sure.
+
+Oh embind does require the `--bind` option on emcc, and a C wrapper rather than the JS wrapper. So this would mean we need 2 levels of wrappers if we use `--bind`.
+
+Ok, so let's take a look at how emscripten-packages work.
+
+This post illuminates the usage of emscripten-packages: https://github.com/NixOS/nixpkgs/issues/15873
+
+There's an environment variable called `EMCC_LOCAL_PORTS` which seems to work together with emscripten-packages.
+
+So I just installed the emscriptenPackages.zlib. And this is what it gives me:
+
+```
+nix/store/*-emscripten-zlib-*/
+nix/store/*-emscripten-zlib-*-dev/
+nix/store/*-emscripten-zlib-*-static/
+```
+
+So it looks like the emscripten stdenv does decide to emit the static!
+
+The dev has 3 directories: include, lib and nix-support. Theinclude contains zconf.h and zlib.h. This makes it equivalent to a C header. While lib has pkgconfig that has pc code that tells us about the out directory, in there we see that `$out` actually does not have a lib. Remember here for libraries the $out/lib has nothing, which makes sense since emscripten doesn't produce shared objects anyway. The only thing that does exist the static directory which does have a lib containing `libz.a`. But note that this means pkg config is not properly configured since it does not point to the proper static directory. I don't think it's right for the static output to be in its own directory, unless all the pkgconfig is fixed to support static designations. Using hexdump, we can confirm that it is infact a llvm bit code, when looking BC.
+
+Ok so that confirms that a static `.a` is outputted from emscripten package even if it's in a special static library. However this path is not added to the pkgconfig nor is it part of the NIX_LDFLAGS. Since the headers are available, these headers are part of the `NIX_CFLAGS_COMPILE`.
+
+Ultimately to make use of the static library, one has to use `${emscriptenPackages.zlib.static}/lib/libz.a`. There's nothing hooking that into the shell environment.
+
+Since the emscripten packages issue on Nixpkgs is not resolved, and using it would mean builds would only work on Nix, I think it's better to not bother here with emscripten packages atm, and focus on bringing in the dependencies as submodules directly here.
+
+Ok here's the plan.
+
+We're going to play around with embind with just normal C files, and see what we can do here. If it works, we'll use embind on just libgit2 without any other dependencies. It should just work with emcmake (even though I don't really know what it does). For now we should also remove the shared object dependencies, since they might just confuse things.
+
+Should also add:
+
+```
+--output_eol linux
+```
+
+Always.
+
+Also when emscripten supports overloading the rootfs, I can ditch the pluggable backend, and instead just directly overwrite the internal FS using this: https://github.com/jvilk/BrowserFS/blob/master/src/generic/emscripten_fs.ts But instead of BrowserFS, I just use VirtualFS.

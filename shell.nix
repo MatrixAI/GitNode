@@ -6,11 +6,6 @@
       emscripten
       cmake
       pkgconfig
-      libssh2
-      zlib
-      openssl
-      curl
-      http-parser
       python2
       nodejs
       nodePackages.node2nix
