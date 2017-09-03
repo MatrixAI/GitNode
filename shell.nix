@@ -11,4 +11,8 @@
       nodePackages.node2nix
       flow
     ];
+    shellHook = ''
+      EMSCRIPTEN_ROOT_PATH='${emscripten}/share/emscripten'
+      EMSCRIPTEN='${emscripten}/share/emscripten'
+    '';
   }

@@ -374,3 +374,102 @@ Should also add:
 Always.
 
 Also when emscripten supports overloading the rootfs, I can ditch the pluggable backend, and instead just directly overwrite the internal FS using this: https://github.com/jvilk/BrowserFS/blob/master/src/generic/emscripten_fs.ts But instead of BrowserFS, I just use VirtualFS.
+
+Cmake has modules such as `CheckLibraryExists` or `FindPkgConfig`. These are all scripts designed to find these things in the current environment looking at environment variables.
+
+`OPTION` is for declaring variables that can be set by the user via `-D` flags. We have these options:
+
+```
+SONAME - set the version of the shared object
+BUILD_SHARED_LIBS - build for shared library, off for static - what does this mean??
+THREADSAGE - on by default
+BUILD_CLAR - build test cases
+BUILD_EXAMPLES - build examples
+TAGS - not sure
+PROFILE - no need for this
+ENABLE_TRACE - no need for this
+LIBGIT2_FILENAME - no need for this
+
+USE_SHA1DC - use sha1 with collision detection
+```
+
+The latest libgit2 is intending to integrate mbedtls. This may mean it is unnecessary to link to openssl. This is being driven by Ubuntu and Debian who don't link into openssl for some reason. However HTTPS still requires a designation of the certificate store. This should be provided by the OS. But I'm not sure how this translates to emscripten. It will be set by an environment variable `-DCERT_LOCATION` when mbedtls is integrated. However this means you'd need to represent an emscripten filesystem, and would have to embed the certificates into the resulting `.js` file.
+
+https://github.com/libgit2/libgit2/pull/4173#issuecomment-325756802
+
+But mbedtls is not yet available, so we just cannot activate HTTPS yet here!
+
+
+```
+-DUSE_SHA1DC=ON
+-DBUILD_SHARED_LIBS=OFF
+-DBUILD_CLAR=OFF
+-DBUILD_EXAMPLES=OFF
+-DUSE_SSH=OFF
+-DUSE_OPENSSL=OFF
+-DUSE_ICONV=OFF
+-DUSE_GSSAPI=OFF
+-DCURL=OFF
+-DCMAKE_BUILD_TYPE=Release
+```
+
+When `BUILD_SHARED_LIBS` is enabled which it is by default, it will set `-fPIC` as part of cflags, and if supported, it will use `-fvisibility=hidden`. We are not building a shared object, but we're also not building a static library in the native fashion so we should disable this. Since these options means nothing for us. Note that with `-fvisibility=hidden` it inverts GCC behaviour with regards to exporting a function, any function not explicitly marked as exported becomes internal, unlike the default behaviour.
+
+Since we're writing a c wrapper using embind, we need to also make our own cmake file right? Well... I'm not sure. Well emscripten should pass those in to compile the libgit2 source into a bitcode file, while then also compiling our own libgit2 wrapper into bitcode, and finally joining them together. So I think this can be done with a shell script instead of another cmake! Pkgconfig doesn't matter and we shouldn't need to bring it in.
+
+What does `USE_SHA1DC` do? It results in extra flags sent to the compiler, specifically `GIT_SHA1_COLLISIONDETECT` also no standard includes, and also brings in common.h. I think this results in a more robust git. I think we should enable it.
+
+I found how setup hooks are done, they are specified as part of the stdenv.mkDerivation: `setupHook`. This can point to a shell script with a number of exported functions. This means when some other package puts the package into their build inputs or native build inputs, the setuphook gets executed, and usually this is useful for build tools that are placed in the build inputs of a shell.nix or a default.nix. The manual doesn't specify that cmake also exports setup hooks. Note that I think the setuphook is only executed during fixup phase, or something else. Because else I would see some messages upon running nix-shell. Adding the setuphooks actually makes those functions available to cmake's own derivation. But I'm not sure how that works with the package as a build input to subsequent systems. The list of setup-hooks in Nixpkgs is at `pkgs/build-support/setup-hooks`, however not every hook is specified there such as cmake's setup hooks.
+
+This explains the different ways of finding package using cmake which includes pkg-config:
+https://stackoverflow.com/questions/25959972/what-is-the-difference-between-find-package-and-pkg-search-module
+
+Note that when using `emcmake` I think it uses the `Emscripten.cmake` that overrides some cmake flags such as the size of a pointer, preferring to build 32 bit architecture because JS doesn't have 64 bit integers. https://github.com/kripken/emscripten/blob/master/cmake/Modules/Platform/Emscripten.cmake
+
+Oh it says to make use of it, invoke cmake with: `-DCMAKE_TOOLCHAIN_FILE=<EmscriptenRoot>/cmake/Modules/Platform/Emscripten.cmake`. I wonder if this has any relationship to `emcmake`. Oh you also need `-G` option to make it generate Unix makefiles, so that you can then just run `make` normally. It doesn't generate it by default? Oh it does. But we still end up using `cmake --build` Why? Oh using `cmake --build` abstracts the native build tool's command interface with extra options such as directory and target, config, and clean first.. etc. So under the hood it still uses the generated build system. If you don't specify the generator, it will auto choose one. I see.. this is why using `cmake` then `cmake --build` is more platform independent. So `-DCMAKE_BUILD_TYPE=MinSizeRel` is still going to be needed.
+
+Oh we need the `$EMSCRIPTEN` environment variable or `$EMSCRIPTEN_ROOT_PATH`. But it appears that emscripten doesn't set a setuphook to define these variables. So we have to create our own shell hook for this then. These things aren't well documented, but it does need to be set for a number of other tools to end up working. Especially since the cmake script is also part of this same thing. It's in specifically the share part. I wonder if you can load it as a module.
+
+So I can see that cmake definitely sets up some setuphooks to set `CMAKE_INCLUDE_PATH`, `CMAKE_PREFIX_PATH`, and `CMAKE_LIBRARY_PATH`. These three environment variables affect the `FIND_XXX()` commands. Eitheras find file or find program or find library or find path. It turns out that emscripten is part of `CMAKE_PREFIX`. I don't think in this case you can load the cmake emscripten from these paths though, and besides that would require the usage of a module, which doesn't make sense to me yet.
+
+Ok so you actually do `emcmake cmake -DCMAKE_TOOLCHAIN_FILE`. I guess you can just do `emcmake cmake --build` afterwards too.
+
+An issue on emscripten says that `emcmake cmake` is the same as `emconfigure cmake`. And that it also passes the module path and defaults to MinGW generator.
+
+The correct root path should be `${emscripten}/share/emscripten`. All of the bin are actually symlinks pointing to this location.
+
+It appears that the `-DCMAKE_TOOLCHAIN_FILE` is not needed, it already sets it properly.
+
+It appears I get warnings about incompatible pointer type, and also a warning that emcc cannot find library rt. Lib rt is for real time library, it's for being able to get the clock time. This is due to a check inside which adds `-lrt`, however of course emcc cannot find this, and so doesn't bother with it. That's fine, it appears to work without it. Not sure about the incompatible pointer type, these warnings did not occur on the native build.
+
+```
+emcmake \
+  cmake \
+  -DEMSCRIPTEN_GENERATE_BITCODE_STATIC_LIBRARIES=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DUSE_SHA1DC=ON \
+  -DBUILD_CLAR=OFF \
+  -DBUILD_EXAMPLES=OFF \
+  -DUSE_SSH=OFF \
+  -DUSE_OPENSSL=OFF \
+  -DUSE_ICONV=OFF \
+  -DUSE_GSSAPI=OFF \
+  -DCURL=OFF \
+  ../libgit2
+cmake --build .
+```
+
+Woot, this produces a `libgit2.bc`. It's done!!!! Note that since we produce bitcode, no dead code elimination was done unlike had we tried to produce `.js` immediately.
+
+Now we that we have this, we can proceed to try to compile or embind C wrapper, that calls into VirtualFS and implements the ODB and RefDB (hopefully that works). And it will all work!
+
+Furthermore this style means it should be possible to then produce the other libraries in bitcode style and link them together. The problem being is that cmake may not find it. I'm not sure how you would make cmake find those libraries, but it may require some fiddling with the cmake environment variables so those libraries (which could be in bitcode form as well) may be found. Otherwise they may have to be left as `.so` or `.a` even though that's confusing.
+
+I wonder how do we pass flags directly to the emcc, so to activate all the optional settings required, such as to enable proper math. Right now `cmake --build .` just runs the emcc directly. Oh those flags in settings.js doesn't matter until the final linking to `.js` executable format. So we don't have to enter those until much later!!! You still have the final `emcc -s OPTION=VALUE -s OPTION=VALUE` call.
+
+Note that the pointer warnings should be fine, it is possibly a consequence of the emcc forcing 32 bit pointers, but `unsigned int *` is always compatible with `unsigned long *`.
+
+Follow this issue!
+
+https://github.com/kripken/emscripten/issues/2655
