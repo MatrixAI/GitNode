@@ -4,7 +4,7 @@
     name = "js-virtualgit";
     buildInputs = [
       emscripten
-      cmake
+      cmakeCurses
       pkgconfig
       python2
       nodejs

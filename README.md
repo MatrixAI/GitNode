@@ -473,3 +473,169 @@ Note that the pointer warnings should be fine, it is possibly a consequence of t
 Follow this issue!
 
 https://github.com/kripken/emscripten/issues/2655
+
+---
+
+```
+# compile our own embind wrapper
+emcc \
+  -O2 \
+  libgit2_wrapper.c \
+  -o libgit2_wrapper.bc
+
+# compile both the wrapper bitcode and the llvm bitcode into the final js module
+emcc \
+  -O2 \
+  -s MODULARIZE=1 \
+  -s EXPORT_NAME=libgit2 \
+  -s FORCE_ALIGNED_MEMORY=1 \
+  -s PRECISE_I64_MATH=1 \
+  -s PRECISE_F32=1 \
+  -s VERBOSE=1 \
+  -s ASSERTIONS=2 \
+  libgit2_wrapper.bc \
+  libgit2.bc \
+  -o libgit2.js
+```
+
+Oh a list can be read from a JSON formatted list of functions like `["_func1", "_func2"]`... The specified path will need to be absolute however!
+
+Oh the same optimization flag must be turned on for converting to bc as well as converting to JS. So if we are using `-O3` for taking bitcode to javascript, this same option must be available for the emcc during compilation to bitcode. I found it, in the `Emscripten.cmake` setup, it will say that `Release` is done with `-O2`. While `MinSizeRel` is done with `-Os`. There are none with `-O3`. Is there a way to override this ourselves? The relevant flags to override are:
+
+```
+CMAKE_C_FLAGS_RELEASE
+CMAKE_CXX_FLAGS_RELEASE
+CMAKE_EXE_LINKER_FLAGS_RELEASE
+CMAKE_SHARED_LINKER_FLAGS_RELEASE
+CMAKE_MODULE_LINKER_FLAGS_RELEASE
+```
+
+I get that the `C_FLAGS` will be relevant here, but I'm not sure how this relates to the EXE, SHARED or MODULE settings. Perhaps for our case only the C_FLAGS is important, but I think all of them needs to be set appropriately. Since shared might be for the linker to do `.so`, while module is for the linker to do `.a` and exe is for the linker to do the final executable. While the `C_FLAGS` is only for compiling to an object file, in emscripten all of these lead to a bitcode, unless the cmake is intended to produce the final executable, in that case the EXE flags would be important. Wait apparently there's also a `CMAKE_STATIC_LINKER_FLAGS`. Ok so what the hell is module? Maybe it relates to Cmake modules, and some cmake modules requires building? Ok now that these are set, how do these get changed according to command line parameters? So Cmake variables are separated between normal variables and cache variables, it turns out that cache variables will be cached into a file called `CMakeCache.txt`, the values here can be edited by the user later to change if necessary. So we can change the optimistion flags here, but it's also not nice, as I would have preferred to be able to set it as an option on the command line. Because these settings were set using `set` and not `options.` Then it doesn't work nicely to be able to override it. So we just have to along with it then.
+
+The final step from bitcode to Js involves JS optimisations. Whereas if no optimisations are set in the source to bitcode, all llvm optimisations are omitted. Different build systems expose different ways of achieving optimisations, so we need to see how this is done.
+
+So we can use `libgit2.so` or `libgit2.a` I think, it all works, but `.bc` should be used when possible.
+
+We can use npm run build to do this for us. But the main idea is that the build occurs directly through a few shell commands.
+
+We also need to set the include path appropriately. We could write our own make file, so that emcc will correctly set the include paths or something else, but where does the libgit2.bc get found. Note that I think variables such as the include path and linker path is probably set the same way gcc is done. So you can always get includes as a current directory, but other than that, this should be done correctly using just `git2.h`. And set the correct include path on the command line. Specifically we should be adding `libgit2/include` as an include path to our emcc compiler. Since our libgit2 was part of the same source repo and not brought in from nixpkgs emscripten-packages, then this will need to be manually in our shell.nix or whatever.
+
+I'm not sure how to get the optimisation flags into the cmake there.
+
+So let's just stick with `-O2` here for now.
+
+---
+
+So I just found out that the usage of embind requires the usage of C++. So instead of writing a C wrapper, you have to write a C++ wrapper, which instead requires `libgit2_wrapper.cc`. Then to use C headers, you would have to bring in `#include <cstdio>` (removing the `.h`, and prepend `c`). However for normal C headers you have to do `extern "C" { #include "someheader.h" }`. It doesn't seem like I should need this though. But namespace declarations become important.
+
+This is not a show stopper, but I need to find out what does the `extern "C"` do.
+
+It makes the function name in C++ have 'C' linkage. This means the compiler doesn't mangle the name. So that client C code linkt o it.
+
+Since C++ has overloading of function names and C does not, the c++ compiler cannot just use the function name as a unique id to link to, so it mangles the name by adding information about the arguments. A c compiler does not need to mangel the name since you cannot overload function names in C.
+
+When you state that a function (which would be the function declaration in a C header) has extern 'C' linkage in C++, the C++ compiler does not add argument/parameter type information to the name used for linkage. So in a library written in C++, you can add them into an `extern 'C'`. And that should make the function declaration linkable by C. It's possible to do things like:
+
+```
+extern "C" void foo(int);
+
+extern "C" {
+  void g(char);
+  int i;
+}
+```
+
+This makes `foo`, `g` and `i` all non-mangled.
+
+In the case of our C++ wrapper do we need to do this with the git2.h? When calling a C function from C++ or calling a C++ function from C, the C++ name mangling causes linking problems. Technically speaking, this issue happens only when callee functions have already been compiled into a binary (such as our llvm bitcode). So we need to use `extern "C"` to disable the name mangling when we're compiling our C++ source code.
+
+Using `#include <cstdio>` will import the necessary IO functions into std namespace and possibly the global namespace.
+
+Both emscripten.h and emscripten/bind.h will export C++ API as well, so we don't need to put that in an extern C, only our git2.h will need this!
+
+Forcing aligned memory is not compatible in fastcomp, and I cannot use modularise nor export name. The modualrise just means that it gets set as a function. And export names keeps complaining about some name not being set.
+
+You need `--bind` at the compilation to `.bc` and at the compilation from `.bc` to `.js`. I wonder if this is required for dependencies as well?
+
+Using the `EMSCRIPTEN_BINDINGS` it automatically creates the relevant function adapter for JS, so I believe it does this via stack allocation then, so it's a bit more higher level.
+
+It appears simple string capability doesn't work, there's some error about allowing raw pointers.
+
+There's the use of `val` function in the test.
+
+While embind will allow raw pointer usage through passing `allow_raw_pointers()`. The way you call in JS involves some explicit memory management. I'm guessing that you still need cwrap or ccall or something like that. Actually ccall and cwrap seems not to be able to work with embind raw pointer functions. Not sure how to actually call a raw pointer usage even after allowing it. It appears that embind just isn't designed to support this use case yet. However it appears this can be done with extern C however. Yep this is possible, as long as you do it in an extern block. Ok...
+
+So we just have to play around with embind and see if we can do progressively more complex things like arrays and structs and objects and stuff like that.
+
+Really all the good tools are about C++ to Javascript!
+
+In C++ it is possible to access the JS global context by using `val::global("Promise")`. Things like that.
+
+Once you have a JS value, it's possible to use template polymorphism and cast them to a C++ value with `something.as<bool>` or `str.as<std::string>`.
+
+With a JS object you can call the constructor by doing this: `something.new_()`. Not sure if it's a convention with `new_` for JS calls.
+
+If a JS object has a function that you can call, or methods. You would do this with val: `context.call<val>("someMethod")`. This is basically `context.someMethod();`. The return type will be put in `<>`. Here it says return something that turns back into a JS value. But you can also use `<void>` when the result is undefined. What about null? Perhaps.
+
+THe nyou can also set properties like `jsobject.set("type", val("something!?"))`. This is basically `jsobject.type = "somethiong";`.
+
+You can then access properties simply with `context["someKey"]`. So in a way this array index access is a bit strange. It basically means Js objects are also like C++ maps, so string indexes are used like that. That's pretty cool.
+
+You can also pass things like `-Wall -Werror` to your own functions! Yea this should be used for own git wrapper so we enable all error checking and show all warnings!
+
+Type conversions also work in embind like this:
+
+```
+void -> undefined
+bool -> true/false
+std::string -> ArrayBuffer, Uint8Array, Uint8ClampedArray, Int8Array or String
+std::wstring -> String
+```
+
+Everything else is a number.
+
+For convenience we also have factory functions to register `std::vector<T>`. Also I don't know what this means is this providing access to vectors and maps to JS or something else?
+
+So you can export classes like:
+
+```
+EMSCRIPTEN_BINDINGS(base_example) {
+  emscripten::class_<BaseClass>("BaseClass");
+  emscripten::class_<DerivedClass, base<BaseClass>>("Derived Class");
+}
+```
+
+Now any functions are going to be available on BaseClass as well as DerivedClass. Ok so this exposes classes to JS. And I suppose those register functions also exposes the ability for JS to create maps and vectors.
+
+Embind currently cannot export overloaded functions based on type, instead you have to select the correct implementation.
+
+```
+struct HasOverloadedMethods {
+  void foo();
+  void foo(int i);
+  void foo(float f) const;
+}
+
+EMSCRIPTEN_BINDING(overloads) {
+  emscripten::class_<HasOverloadedMethods>("HasOverloadedMethods")
+  .function("foo", emscripten::select_overload<void()>(&HasOverloadedMethods::foo))
+  .function("foo_int", emscripten::select_overload<void()>(&HasOverloadedMethods::foo))
+  .function("foo_float", select_overload<void(float)const>(&HasOverloadedMethods::foo));
+}
+```
+
+So embind can auto translate types, but nothing is auto translated to structs, this is why we need a C++ wrapper to essentially take in a val of an object, and then convert that into a struct. By filling in the interface and passing that to the C function. I wonder if we export a type that we just declare but not define, what things may be mentioned?
+
+It's easy enough to export macros.
+
+When you export a struct, you don't actually get their reference anywhere, it appears they just get used along with a function.
+
+Oh cool, it works even if all we have is a function declaration without definition. The final compilation to js is where it complains that iwas not able to find the symbol for that declaration, when it does the linking together. So the final process is when it's important to get all the bitcodes together, and link them all together, in build system, this would be done with their environment variables like CFLAGs and stuff. That's if you were using CMake as well or autotools, but that's a bit weird in a node npm package.
+
+Ifwe use `extern "C"` for the git header, then these names are not mangled. Will these names be made available to the resulting EMSCRIPTEN_BINDINGS and `e::function("somename", &thename)`? I don't know...
+
+Yes those declaration names will be resolved from the `EMSCRIPTEN_BINDINGS` so now we don't have to use `EMSCRIPTEN_KEEPALIVE`. Yes so cool!
+
+Although since you cannot export a struct directly, you can export a constructor a struct. So I guess that's how it kind of works? Also since a struct is a type, I guess it doesn't make sense to export the struct directly.
+
+Note this is the main reason why integrating libgit2 and virtualfs may be complicated: https://github.com/kripken/emscripten/issues/2040
