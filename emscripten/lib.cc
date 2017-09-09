@@ -76,5 +76,5 @@ EMSCRIPTEN_BINDINGS(my_module) {
 
 /*
 emcc -O2 -Wall -Werror --bind ./lib.cc -o lib.bc
-emcc -O2 -Wall -Werror --bind -s PRECISE_I64_MATH=1 -s PRECISE_F32=1 -s ASSERTIONS=2 lib.bc -o lib.js
+emcc -O2 -Wall -Werror --bind --pre-js ./prejs.js -s PRECISE_I64_MATH=1 -s PRECISE_F32=1 -s ASSERTIONS=2 lib.bc -o lib.js
 */

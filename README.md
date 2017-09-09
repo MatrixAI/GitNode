@@ -640,4 +640,27 @@ Although since you cannot export a struct directly, you can export a constructor
 
 Note this is the main reason why integrating libgit2 and virtualfs may be complicated: https://github.com/kripken/emscripten/issues/2040
 
-When using `-O2`, libgit2 will produce both the `.js` and `.js.mem` at the end. This may be undesirable, because when bundling with rollup, it's possible rollup won't know about this file. Further more when loading into the browser, both files will need to be loaded indepedently. The basic reason for this is that large JS files may have problems when loaded by the browser. I think this optimisation is not necessary for libgit2.js, so we should just do: `--memory-init-file=0`. However this is only needed on the final compilation to `.js`. Note that there's also a `Module.memoryInitializerPrefixUrl` that can point to a particular location of the `.js.mem` file which can be loaded by the browser, but again this doesn't seem relevant to non-browser usage. https://github.com/kripken/emscripten/pull/5296
+When using `-O2`, libgit2 will produce both the `.js` and `.js.mem` at the end. This may be undesirable, because when bundling with rollup, it's possible rollup won't know about this file. Further more when loading into the browser, both files will need to be loaded indepedently. The basic reason for this is that large JS files may have problems when loaded by the browser. I think this optimisation is not necessary for libgit2.js, so we should just do: `--memory-init-file=0`. However this is only needed on the final compilation to `.js`. Note that there's also a `Module.memoryInitializerPrefixUrl` that can point to a particular location of the `.js.mem` file which can be loaded by the browser, but again this doesn't seem relevant to non-browser usage. https://github.com/kripken/emscripten/pull/5296 This may not actually matter in the end, we will need to test whether this actually matters.
+
+We need to understand how the C++ to JS works via embind, because if there's a way to use VirtualFS that would be through this method.
+
+Ok so the Module object has a `preRun` concept. Which is an array of functions to call just before calling `run()`. This is useful for setting up things for the Filesystem. This is the proposed way of integrating BFS into Emscripten. But how does this work for cjs require? There's also the fact that you can set the `Module.ENVIRONMENT` property to `WEB` or `NODE` or `SHELL`... etc, this may be required by module bundlers like webpack or rollup, but how is this set when we do a CJS require of the final library in the a wrapper? There is no main function! Ah the way this is done is using the `pre-js` option! It adds JS code that can define or extend the Module object! So this is what we use such that it works even in a cjs require. Note that `SHELL` I think is for HTML output? Oh no, SHELL means it's not running in a browser and not running in Node.js, so it's useful for non-node interpretation environments like Rhino or things like NativeScript. Ok so because this might run in Node and other non-Node, then really we need to only use `SHELL` and `NODE` environment. Anyway, we may not need to do this. But any playing around with this would happen with the prejs option.
+
+So it works, the `--pre-js` works! Ok so some functions can then be executed like this:
+
+```
+var Module = {
+  preRun = [
+    function () {
+      var vfs = new VirtualFS;
+      var evfs = new VirtualFSEmscripten(vfs);
+      FS.createFolder(FS.root, 'data', true, true);
+      FS.mount(evfs, { root: '/' }, '/data');
+    }
+  ]
+};
+```
+
+Notice how the function is able to use of the global variable `FS`, which would be available to be in scope at that function, but the FS object doesn't seem to be exposed. What if we wrote a funtion to return the `FS` instance?
+
+We are able to return the internal FS instance by adding a function to the Module object and returning the FS. The FS has a filesystems property that includes multiple implementations of the FS. However none of them match Node's FS api, as it wasn't designed for it. Instead, the thing is, `FS.filesystems.MEMFS === FS.root.mount.type`. So it seems by finding the right hijacking point, we can overrite the MEMFS implementation just before it is used, and make it instead use VirtualFS. However we now need to adapt VirtualFS to be Emscripten compatible so we create a `EVirtualFS` wrapper around `VirtualFS` to meet the expectations of the Emscripten system.

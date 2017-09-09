@@ -23,10 +23,12 @@ emcc \
   -o libgit2_wrapper.bc
 
 emcc \
-  --bind \
-  -O2 \
   -Wall \
   -Werror \
+  -O2 \
+  --bind \
+  --memory-init-file 0 \
+  --pre-js ./prejs.js \
   -s MODULARIZE=1 \
   -s EXPORT_NAME=LibGit2 \
   -s PRECISE_I64_MATH=1 \
@@ -38,3 +40,7 @@ emcc \
 
 # require libgit2.js into VirtualGit.js module
 # expose a JS wrapper around functions and JS semantics
+# moduralize and export name may not actually work
+# the --memory-init-file=0 makes sure not to have a separate memory file
+# since this is not designed for browser usage, or well it's geared towards system usage anyway
+# libgit2.js would eventually be required by VirtualGit.js and then a proper cjs module and es6 module exposed here, which has to allow the insertion of the VirtualFS as a parameter from the outside
