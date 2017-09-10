@@ -29,8 +29,8 @@ emcc \
   --bind \
   --memory-init-file 0 \
   --pre-js ./prejs.js \
-  -s MODULARIZE=1 \
-  -s EXPORT_NAME=LibGit2 \
+  -s "EXTRA_EXPORTED_RUNTIME_METHODS=['FS']" \
+  -s FORCE_FILESYSTEM=1 \
   -s PRECISE_I64_MATH=1 \
   -s PRECISE_F32=1 \
   -s ASSERTIONS=2 \

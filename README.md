@@ -664,3 +664,90 @@ var Module = {
 Notice how the function is able to use of the global variable `FS`, which would be available to be in scope at that function, but the FS object doesn't seem to be exposed. What if we wrote a funtion to return the `FS` instance?
 
 We are able to return the internal FS instance by adding a function to the Module object and returning the FS. The FS has a filesystems property that includes multiple implementations of the FS. However none of them match Node's FS api, as it wasn't designed for it. Instead, the thing is, `FS.filesystems.MEMFS === FS.root.mount.type`. So it seems by finding the right hijacking point, we can overrite the MEMFS implementation just before it is used, and make it instead use VirtualFS. However we now need to adapt VirtualFS to be Emscripten compatible so we create a `EVirtualFS` wrapper around `VirtualFS` to meet the expectations of the Emscripten system.
+
+Using the `EM_ASM` you cannot access C variables. And you cannot return value back. However there is `EM_ASM_ARGS`, `EM_ASM_INT`, and `EM_ASM_DOUBLE`.
+
+Using `EM_ASM_INT` allows you to write inline JS that accepts arguments of int or double, and returns an int. Whereas `EM_ASM_DOUBLE` does the same but returns double.
+
+For example:
+
+```
+int x = EM_ASM_INT({
+  console.log('I received: ' + [$0, $1]);
+  return $0 + $1;
+}, calc(), otherCalc());
+```
+
+If you only just receive output without inputting anything use the `EM_ASM_INT_V` or `EM_ASM_DOUBLE_V`.
+
+I'm not sure but what about `EM_ASM_` and `EM_ASM_ARGS`?
+
+Apparently strings can also be passed, but more complicated things like objects cannot. It seems that the ability of C to call JS is quite limited.
+
+There are types to use in callbacks, and these are C types, that you can type a particular function, supposedly if a C code returns a function back to JS, that's what it would have to do!
+
+So embind can be used, but also preamble.js and also `Module.Runtime`, which gives low level runtime functionality.
+
+It's possible to expose a C function that utilises eval, basically it can take scripts and then eval JS inside the Emscripten module. This can be disabled, but prevents the usage of `embind`, so I cannot disable dynamic execution.
+
+There may be some integration points in preamble.js and related to prejs.js for us to utilise VirtualFS instead of MemFS. But remember there may be some other functions that we need to support.
+
+The `emscripten_set_main_loop` will set a C function as the main event loop.
+
+Other functions relate to the JS runtime and environment and providing these pieces of information to the C. Like `emscripten_get_device_pixel_ratio`.
+
+Also functions related to indexdb and functions related to web workers.
+
+And relevant equivalents to AJAX exposed in the form of C functions like `emscripten_wget`. All of this is part of the `emscripten.h`.
+
+We can get the compiler settings via `emscripten_get_compiler_setting`. Useful things are usually related to debug level, optimisation level and emscripten version.
+
+---
+
+Relevant to us is the socket event registration.
+
+Events here are analogous to websocket events, but are emitted after the internal emscripten socket processing has occurred. This means for example that the message callback will be triggered after the data has been added to the `recv_queue`, so that an application receiving this callback can simply read the data using the file descriptor passed as a parameter to the callback. All of the callbacks are passed a file descriptor representing the socket that the notified activity took place on. The error callback also takes an int representing a socket error number like `errno` and a `char *` that represents the error message.
+
+This all occurs on the `Module` object. That is you can define things like `Module['websocket']['on']('error', function () {})` that basically attaches a function to the error event on websockets. I suppose this can also be done dynamically and does not need to be set statically at the prejs.js. So this a custom functionality added to the Module object, but this a weird design to have certain things usable from C, and certain things usable from JS. Instead perhaps a JS specific stdlib should be have been used and then exported to both C and JS, so both can share the underlying objects.
+
+So while `emscripten.h` deals with the Emscripten runtime and Emscripten settings. `html5.h` allows C/C++ to bind into HTML events. Basically it's the DOM library in C/C++.
+
+JS APIs defined in `preamble.js` exposes capabilities to the JS side to call into C/C++, basically the compiled stuff that emscripten has done. It has some relationship to embind I guess, but embind goes beyong `preamble.js`. Perhaps this is where the filesystem is initially initialised (with the new objects and stuff).
+
+Within the `preamble.js`, it uses a `maybeExport` to export the all the functions that are available on the `Module` object. And it's funny how `allocate` is documented to be for advanced users, while `_malloc` is documented for user usage, this is weird naming mistake? But there's also `_free`. So I can see that `preamble.js` definitely sets up some initial functions as part of the `Module` object. When `NO_FILESYSTEM` is a macro, then a bunch of functions that is part of `FS` is set to errors. https://github.com/kripken/emscripten/blob/master/src/preamble.js#L2006-L2022 So the preamble is preprocessed and the output is prepended to thecompiled output of the C/C++ code. This must mean that at some point the prejs must be included into the preamble. Maybe it's part of `PREAMBLE_ADDITIONS`?
+
+Ok so apparently `prejs` runs before Module is declared. This makes sense, since we can define our own Module object, and if Module were already defined, then our definition would override it. So yea, prejs already goes beyond it! And remember how JS does its binding, normally the this binding is lost within objects. So when adding a function to Module that returns FS. This FS appears loosely bound that's why it works. Yep this is because JS by default does not do lexical binding, instead it does dynamic binding. So this both works for variables in the closure and variables within the object. Of course this is now changed with the introduction of `let` and `const` var declarations.
+
+Ok if prejs runs before Module is even created, this gives us a hook point before the module properties are event setup. However I do need to intercept where the Module is filled, but the FS is not yet initialised, if there's a hook point here, then I can use it and monkey patch in the usage of EVirtualFS.
+
+So ok, I'm not sure where the prejs and the preamble is put together, but it does seem we have prejs first, then preamble. However something fills in what the global `FS` is, and that's through some sort of `--js-library` option, which brings in a JS library in addition to the core libraries in `src/library_*.js`. Which means the provision of JS libraries to the emscripten system is similar to linking in JS core libraries, this is not a module system, it's simply providing a JS object, that appears to exist globally within the Module context. I wonder how you would call into functions provided by an outside `--js-library` either in prejs or in Emscripten directly, perhaps it would use `EM_ASM` variants to call in these functions.
+
+So `library_fs.js` has a number of functions that appear to be the init functions: `staticInit` and `init`.
+
+The staticInit function is what mounts the MEMFS at root.
+
+https://github.com/kripken/emscripten/blob/master/src/library_fs.js#L1382-L1405
+
+So we can see that it first creates a nameTable which is an array of 4096. Then it does `FS.mount(MEMFS, {}, '/')`. Then it runs `FS.createDefaultDirectories()`, `FS.createDefaultDevices()`, and `FS.createSpecialDirectories()`. Finally it assigns all the possible filesystems depending on preprocessor flags.
+
+The `init` function instead initialises apparently according to some sort of stdin, stdout and stderr. This is because the `Module` object can provide alternative instances of `input`, `output` and `error` streams. But that's because the `init` function is called with undefined parameters.
+
+We can see what these defaults are:
+
+https://github.com/kripken/emscripten/blob/master/src/library_fs.js#L1252-L1256 - creates directories of `/tmp`, `/home` and `/home/web_user`. This is specifically relevant to Emscripten and nobody else.
+
+The mkdir calls then just perform `mknod`. The `mknod` then eventually calls `parent.node_ops.mknod`. So `parent` is infact a created parent node. It doesn't make sense why all of their adapters put in methods called `node_ops`. Perhaps they started with adaptation of the Node FS, but then stopped, or they are just using the "Node FS API". Meaning the resulting functions look like node functions but they aren't, but they decided to group these functions under `node_ops`. Errors are returned via `FS.ErrnoError`. So it doesn't appear to be catching exceptions and then returning them, instead it has various checks, and then returns an exception that's common across all the FS backends.
+
+Who supplies the real implementation of `node_ops`. Well the strategies of `MEMFS` which is `src/library_memfs.js`, supplies these functions. So when a node is created, and the very first node is the root node, upon creation, the result is objects which has reference to the internal methods that create more of itself. So within MemFS, it creates a set of special `node_ops`, which are assigned to special inodes. OOOOHHH `node_ops` refer to the functions that work on an inode, not anything to do with NodeJS. LOL. Ok so it's basically structured in this way, where each inode has its own internal operations that can add new inodes as children to itself.
+
+Apparently there is a `postamble.js` that does export the FS as well, so there's no need to add our own function to export the FS directly. That's pretty strange. Why is it not available, it's because of forced filesystem linking right?
+
+Wait... could we delay the initialisation as well, so that we can pass in the correct FS instance before initialising the entire libgit2 module? Can require calls occur within JS dynamically? So the issue is that ES6 import will not work in this way, BUT require calls can be dynamic. Still the main issue is that importing shouldn't initialise the FS straight away, I want a way to override the internal FS backend.
+
+Let's try this with the forced linking of FS operations. It relies on the `maybeExport` function which is defined in `modules.js`.
+
+It relies on `EXPORTED_RUNTIME_METHODS`. Oh we use `EXTRA_EXPORTED_RUNTIME_METHODS` to do this.
+
+There you go, you can get the FS module just by adding it to the `EXTRA_EXPORTED_RUNTIME_METHODS` whereever you see the `maybeExport` you can use it.
+
+All the default runtime methods are utility functions that help with interop between C and JS usually to do with strings and the heap allocated chunks. Using CJS require you don't need modularize options. You should then also add force filesystem if you don't have it.
