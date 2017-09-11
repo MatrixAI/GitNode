@@ -751,3 +751,278 @@ It relies on `EXPORTED_RUNTIME_METHODS`. Oh we use `EXTRA_EXPORTED_RUNTIME_METHO
 There you go, you can get the FS module just by adding it to the `EXTRA_EXPORTED_RUNTIME_METHODS` whereever you see the `maybeExport` you can use it.
 
 All the default runtime methods are utility functions that help with interop between C and JS usually to do with strings and the heap allocated chunks. Using CJS require you don't need modularize options. You should then also add force filesystem if you don't have it.
+
+The default function to export is main, however if no main is defined, then this is not exported. There's also library deps and default library functions to export, but I don't think that's relevant except for the memory functions.
+
+We have 2 defined hook points: `preRun` and `preInit`.
+
+Firstly `preRun` exists in these locations in src:
+
+```
+memoryprofiler.js
+preamble.js
+emscripten-source-map.min.js
+shell.js
+library_fs.js
+shell_minimal.html
+postamble.js
+shell.html
+```
+
+What is most interesting is the existence of `preRun` at `preamble.js`, `postamble.js` and `library_fs.js`.
+
+Within the `preamble.js` there's the variables:
+
+```
+__ATPRERUN__ // functions called before the runtime is initialised
+__ATINIT__ // functions called during startup
+__ATMAIN__ // functions called when main() is to be run
+__ATEXIT__ // functions called during shutdown
+__ATPOSTRUN__ // functions called after the runtime has exited
+```
+
+I wonder how these correspond to the module properties. There's a function `addOnPostRun`. These are part of `maybeExport`. So these functions that add extra hooks are maybexported but are not documented. These are actually exported. But how are you supposed to run these when the initialisation is already done!?
+
+There's also the setting `INVOKE_RUN` which says to run the main immediately, but I don't have a main so this shouldn't apply.
+
+Wait it's the postamble that actually calls stuff like main!? Does that mean the FS is only initialised on postamble!?
+
+So it appears that what ever that exists in `preRun` property is actually added to the `__ATPRERUN__` array by the `preRun` function. That is defined at `preamble.js`. So while there aren't properties on the module object for registering `preMain` and other pre functions, these can be used by the caller, since main can be not invoked. Wait... the `preMain` and functions like these are hoisted. Since `prejs` is literally prepended. This means at the prejs you can actually call these functions, and these will add callbacks into the above hook point arrays. Yea... that does make sense.
+
+```js
+function preRun() {
+  // compatibility - merge in anything from Module['preRun'] at this time
+  if (Module['preRun']) {
+    if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
+    while (Module['preRun'].length) {
+      addOnPreRun(Module['preRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPRERUN__);
+}
+
+function ensureInitRuntime() {
+  if (runtimeInitialized) return;
+  runtimeInitialized = true;
+  callRuntimeCallbacks(__ATINIT__);
+}
+
+function preMain() {
+  callRuntimeCallbacks(__ATMAIN__);
+}
+
+function exitRuntime() {
+  callRuntimeCallbacks(__ATEXIT__);
+  runtimeExited = true;
+}
+
+function postRun() {
+  // compatibility - merge in anything from Module['postRun'] at this time
+  if (Module['postRun']) {
+    if (typeof Module['postRun'] == 'function') Module['postRun'] = [Module['postRun']];
+    while (Module['postRun'].length) {
+      addOnPostRun(Module['postRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPOSTRUN__);
+}
+```
+
+Who calls `preRun`? It's the `postamble.js` that's what calls `preRun()`, notice how inside the `preRun`, it eventually calls `callRuntimeCallbacks` which means that's where things are actually initialised. So if the `postamble.js` can be changed to not call the initialisation and delay it until a user provided init function, then that would be great!
+
+Hah I can see a `postRun` hook also here but not documented. Weird how nothing is added to premain. Also weird how `preInit` is actually handled in postamble, not preamble, there really needs to be some refactoring here, it's all over the place!
+
+Ok I got it now, the `run` function is the actual emscripten initilisation, and that's separate from the application defined `main`. It's like the main in assembly and the actual program load initialisation. `run` is defined at line 186 in postamble.js. It checks for args, and then runs the `preRun()`, then `preMain()`.
+
+```js
+function run(args) {
+  args = args || Module['arguments'];
+
+  if (preloadStartTime === null) preloadStartTime = Date.now();
+
+  if (runDependencies > 0) {
+    return;
+  }
+
+  preRun();
+
+  if (runDependencies > 0) return; // a preRun added a dependency, run will be called later
+  if (Module['calledRun']) return; // run may have just been called through dependencies being fulfilled just in this very frame
+
+  function doRun() {
+    if (Module['calledRun']) return; // run may have just been called while the async setStatus time below was happening
+    Module['calledRun'] = true;
+
+    if (ABORT) return;
+
+    ensureInitRuntime();
+
+    preMain();
+
+    if (Module['onRuntimeInitialized']) Module['onRuntimeInitialized']();
+
+    if (Module['_main'] && shouldRunNow) Module['callMain'](args);
+
+    postRun();
+  }
+
+  if (Module['setStatus']) {
+    Module['setStatus']('Running...');
+    setTimeout(function() {
+      setTimeout(function() {
+        Module['setStatus']('');
+      }, 1);
+      doRun();
+    }, 1);
+  } else {
+    doRun();
+  }
+
+}
+Module['run'] = Module.run = run;
+```
+
+What we see here is that the `run` will check for module arguments, that appears to be set either by the module prejs or outside somewhere else. Then it will run `preRun()`. Then it defines a function that will be executed, and that's something then runs `ensureInitRuntime()`, then `preMain()`, then `onRuntimeInitialized()`, then calls main with args if it exists, then runs `postRun()`.
+
+
+So who calls `run`? Especially since it's exposed to the `Module` object as well. The `shouldRunNow` refers to `main` not `run`. So changing that does not prevent running. Finally at line 339 to 343. Is where the `run()` gets called, and so the `postamble` always calls run!
+
+So I can see it then. `preInit` is what gets called first. It does its job even before init. But that means none of the initialisation stuff is available. So this doesn't allow us to overrite the MEMFS implementation.
+
+We can delay run, only by wrapping the whole thing with prejs and postjs as a function. Then when requiring the function is exported.
+
+Looking at the finished thing. The main thing is:
+
+1. Definition of the Module object. Which was prepending via prejs. Then the default definition of the Module if it doesn't exist, and if it does, adding in all the default methods.
+
+Next is the `shell.js`.
+
+So:
+
+1. prejs (file prepend inclusion)
+2. shell.js - sets up the defaults here! this is also how it determines how to export stuff
+3. preamble.js
+4. compiled output
+5. postamble.js
+6. postjs (file append inclusion)
+
+In the `shell.js` there's a `moduleOverrides` it says that the Module object sometimes has properties that is meant to override the default module functionality. So these are collected into the `moduleOverrides`, such that after the default module properties are added, the conflicting elements override the builtin module properties.
+
+The preprocessor that emscripten supports interpolation via `{{{ SOME_VARIABLE }}}`. So thing's like `{{{ PRE_RUN_ADDITIONS }}}` is actually meaningful. So these are also not documented lol. But it's also redundant because `preInit` is already going to be executed there. However the existence of this variable can be used from emcc and also to do weird macro stuff.
+
+There's also another undocumented property `noFSInit` that is used within `library_fs.js` that basically means it adds a function to the `__ATINIT__`.  This is confusing. Basically `ensureInitRuntime` is what calls the functions in `__ATINIT__` while `preInit` has nothing to do with `__ATINIT__`. Then `ensureInitRuntime` is called by `run`.
+
+So the JS code don't work as modules, instead they are just file-inclusion merged like C. It seems like it has it's own module system that uses a function called `mergeInto`. Basically it points to the `LibraryManager.library` and merges into another object and this object has a special property called `$FS__postset`, that calls `FS.staticInit()` and then adds a function that checks for `noFSInit` and then runs `FS.init()`. Note that `staticInit` is the one that mounts `MEMFS` onto the root. So this is not conditional on `noFSInit`. `noFSInit` is only relevant to std streams.
+
+The mergeInto just copies the properties on the second parameter onto the first, so it allows you to add functions into the context where it can be called by the C/C++ within `EM_ASM` but also I guess functions that are in preamble and postamble. I'm not sure how it resolves the final object. Like in the `library_fs.js` it runs this as well but merges the `$FS` instead of `FS`. But then all the functions within it refer to `FS` instead. The `maybeExport` relies on eval since it actually generates JS syntax. As a string. This is why it's placed into `{{{ maybeExport('FS') }}}`. Woah there's a lot of metaprogramming here. And the reason it works here is because after joining together all the libraries via straight file read, it actually runs a preprocessor over them, and then runs eval on them. This is why I think then somehow `$FS` becomes `FS`.
+
+How does `$FS__postSet` work? A `__postset` is a string that the compielr will emit directly into the output file. So basically properites defined in the libraries that are getting merged eventally become global hosted functions or properties. And the postset properties get interpolated directly into the resulting library and is executed. So in the case of `$FS__postset` the string just gets interpolated and the prefix `$FS` doesn't matter, it's just for labelling.
+
+What determines the order of these `__postset` things? The docs say that keys starting with `$` are stripped. So yea, I think `$FS` is only for allowing other libraries to define dependencies. Using `__deps`. This whole thing is just so that they can have out-of-order library declarations and then have a resolver that finds out the right dependency order. Why didn't they just use an existing module system? Like requirejs or es6 modules? Well this was written before ES6 and you cannot use node like modules in something that is cross platform, so in the end the proper one to use should have been UMD. But I think now someone should refactor emscripten to use ES6 modules.
+
+Ok so then postset must be used immediately as `library_fs.js`. This would result in an immediate static initialisation of the FS. Therefore if there was a way to inject code between the "import "of FS and the `$FS__postset`, then it could work to override the `MEMFS`. Alternatively since we found out about `moduleOverrides`, we could supply an alternative representation of the `FS` object. But now our `FS` would have to behave quite differently from the existing `FS`. Oh it appears moduleOverrides cannot override the `FS` because it already runs before the `{{ BODY }}`. The shell.js is what determines how to export things, in this case, it runs `module['exports'] = Module` if `module` is is not equal to undefined. So this is exactly like a nodejs cjs module that will have some initialisation occurring before exporting.
+
+It is `modules.js` that exposes the `mergeInto` function and also merges all the designated libraries together. It is called by `compiler.js`. The `compiler.js` loads both modules.js and jsifier.js, the jsifier.js will bring in shell.js. The `jsifier` should be the one that deals with `postset`. Hold on if we create our own FS library in the form of `mergeInto`, we could use `STRICT` mode or make sure that FS is not linked directly, and instead link our own FS library into it?
+
+It happens here:
+
+```
+    if (!NO_FILESYSTEM) {
+      // Core filesystem libraries (always linked against, unless -s NO_FILESYSTEM=1 is specified)
+      libraries = libraries.concat([
+        'library_fs.js',
+        'library_memfs.js',
+        'library_tty.js',
+      ]);
+
+      // Additional filesystem libraries (in strict mode, link to these explicitly via -lxxx.js)
+      if (!STRICT) {
+        libraries = libraries.concat([
+          'library_idbfs.js',
+          'library_nodefs.js',
+          'library_sockfs.js',
+          'library_workerfs.js',
+          'library_lz4.js',
+        ]);
+      }
+    }
+```
+
+SO here, what we can do is switch on STRICT mode. (it is by default false). Also switch on `NO_FILESYSTEM`. We don't need any of those extra things. What we do need is to link in our own library. However this means that our own library will need to expose a delayed initialisation. And also support all the constructs of the main library. Wait, if we want libgit2 to be exposed in this way, we are just forcing virtual libgit2. The delayed is important so we can submit in a FS implementation and a FS instance at JS time, rather than at compile time. STRICT is not necessary but we don't need any of them EXCEPT `library_sockfs.js`. Although I don't know what `sockfs` has to do with websockets. When you enable strict, you will need `-lxxx.js` options like `-lsockfs.js` or `-ltty.js`. I don't know how these interact. I think sockfs is required for actual socket operations, it's the only thing supplying the `createSocket` function and this is used by `library_syscall.fs`. It relies on the FS because it uses indoes to store the socket structure. Verys strange, but again this relies on the `mount` capabilility of `FS`. `--js-library` We can use this: https://github.com/evanw/emscripten-library-generator Nah we can't do that. Ok I can see this, that `library_fs.js` depends on `$MEMFS` which is of course `library_memfs.js`. While memfs relies on `$FS` ok so that is a circular dependency, this should be ok.
+
+Alternatively we can fork emscripten, change the staticInit of FS such that it doesn't do that until `init`. Or you fork it and change `library_memfs.js`... oh yea, you can just relink the `library_memfs.js` instead. So that's probably simpler... but we still need to allow instance passing as a parameter. That could be done inside memfs.
+
+I THINK that's it, we use `NO_FILESYSTEM=1`, strict is left as is, and instead just force link `-lfs.js -ltty.js` and `--js-library our_own_memfs_library.js`. Hopefully that works. In this way, we don't actually need to export the FS anymore except for introspection. So the key idea is that the `memfs` library will allow a different backing store after deriving a certain property from `Module` or some global object that is passed in via prejs and postjs?
+
+Remember what `NO_FILESYSTEM` prevents, you end up needing `-lfs.js -ltty.js` and that's it. See that using `__postSet` you're able to ask for `Module` and if there's a relevant property in it. The the prejs and postjs wrapper function, and export that. However note that by doing so it does do this weird thing with `nodejs` environment by also using `module["exports"]`, you might want to fix the environment somehow such that it's neither nodejs nor anything else. But still export it? Perhaps using ES6 modules? With ES6 you'd need to only support systems that have ES6. It's ok, cause rollup will deal with this. OK, that's the solution.
+
+There are some extra functions to support:
+
+```
+allocate
+mmap
+msync
+llseek
+getattr
+setattr
+mknod
+```
+
+Note that `flock` would be provided by the emscripten `library.js` instead of the FS implementation... interesting.
+
+Should also support the singleton representation of VirtualFS. For a singleton to work, it would have to represent a separate constructor of VirtualFS. Oh it's really easy.
+
+We need to do a sanity test to see if this would really work.
+
+```
+emcc -O2 -Wall -Werror --bind --pre-js ./prejs.js -s "EXTRA_EXPORTED_RUNTIME_METHODS=['FS']" -s NO_FILESYSTEM=1 -s PRECISE_I64_MATH=1 -s PRECISE_F32=1 -s ASSERTIONS=2 lib.bc -o lib.js
+```
+
+When you run with `NO_FILESYSTEM` because it's not linked, there's no compilation error, however the FS is still supplied, but it's a simple stub, as it only results in errors. Ok this makes sense. And certainly provides a path to supplying your own FS implementation. These stubs are supplied by the `preamble.js`. However now if I provide linking abilities...
+
+```
+emcc -Wall -Werror --bind --js-library ./library_virtualfs.js ./lib.cc -o lib.bc
+
+emcc -Wall -Werror --bind --js-library library_virtualfs.js --pre-js ./prejs.js --post-js ./postjs.js -s INCLUDE_FULL_LIBRARY=1 lib.bc -o lib.js
+```
+
+It doesn't work!!! The `-l` options don't do anything!? If I remove the `.js` suffix, it gives me back warnings, if I leave them in, I assume they have been found, so why did the FS errors still occur!?
+
+There's also `SYSTEM_JS_LIBRARIES` setting as well?
+
+I know why, it's cause `NO_FILESYSTEM` is used in more places than just where they are being linked. The usage of this `NO_FILESYSTEM` prevents the fs from being initialised. The preamble says that if `NO_FILESYSTEM` is set, it overwrites what the FS object is, to be instead an object of stub functions. Since the `preamble.js` is loaded after compiler.js and jsify.js and module.js, then I think it overwrites what the FS object is. There's alos other checks on `NO_FILESYSTEM`, so to main compatibility, we cannot use `NO_FILESYSTEM`.
+
+Ok I know where it is now. It's part of the `preInit` function that's where you can get access teh `FS` object, while being able to monkey patch it before `run` is called.
+
+Oh no, staticInit is at 6506.... no it won't work. Remember it's because of how `postSet` gets called interpolated and emitted directly. There's no hook point between the definition of the FS object (which is derived from the whole complicated module system), and its postSet commands which is just runnig staticInit. The only way we can deal with this is through overriding the linking part. Such that we link an alternative memfs into it that's based on VirtualFS. But we cannnot use `NO_FILESYSTEM`, and I'm not sure how the system reacts to 2 libraries the exporting the same things. In JS how does the merging of object keys work?
+
+For every library which is in an array, it takes the filename out, this is the filepath I guess. Actually I just realised that `additionalLibraries` just come directly from the emcc compilation command. There's no usage of `--js-library` for `additionalLibraries`, what the hell!? Ok so modules.js is part of the compilation system. So it needs nodejs to run these things. Ok so we read in these files, preprocess them, process the resulting macros, and then run `eval` on the processed. Wait it seems that it should be possible to overwrite them!?
+
+There we go, so `library.js` is the thing that means `LibraryManager.library`. It is what handles the resolution after `mergeInto` is evaluated. So all `mergeInto` does is put the `$MEMFS` property into `LibraryManager.library` object. This means `library.js` is also getting evaluated at compile time. No that's not it. It's definitely still in `modules.js` and `compiler.js`.
+
+Ok `--js-library` does work, it just gets eliminated for some reason, most likely because it's not being used. You have to use like `INCLUDE_FULL_LIBRARY` to make sure that gets used.
+
+HOLYSHIT IT WORKS. It works because additional libraries loaded afterwards wipes the previous setup of MEMFS. And there we go, we have overridden memfs definition using `--js-library`.
+
+Ok so what we need to do is create a memfs library wrapper around virtualfs, supply it into this. However this specific one needs to be done dynamically right? So it's not just using a new virtualfs, but being passed in from the outside.
+
+ALTERNATIVELY we could represent virtualfs as singleton, so each creation of virtualfs represents the same virtualfs. This may make certain integrations more easier. And then we would have a single virtualfs to deal with.
+
+However, this may not work when say dealing with multiple key nodes, and each keynode has many key repositories each which is independently encrypted. But again, that's not really a problem, since we can use subdirectories for this purpose.
+
+We can also overwrite and change to a different shell.js so we can export it the way we want?
+
+```
+import LibGit from 'lib.js'
+let git = LibGit(new EVirtualFS());
+```
+
+The construction of libgit requires passing in the necessary git system. So the idea is to expose VirtualFS to emscripten, through a js-library. But the fact that we need to pass it in, indicates the necessary VFS instance. Note that as it is a function that represents a `vfs`.
+
+```
+emcc -Wall -Werror --bind --pre-js ./pre.js --post-js ./post.js --js-library ./library_virtualfs.js ./lib.bc -o ./lib.js
+```
+
+So that means the virtualfs wrapper only exists here and we just integrate it here? Or should we bring in the `library_virtualfs.js` wrapper from the virtualfs repository? But the problem is that we need to export the actual file, not just module. That is the result must be an actual file that we can pass at the command line.
+
+One way to do it is to use the vfs instance to expose the memfs.
