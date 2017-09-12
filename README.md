@@ -1028,3 +1028,134 @@ So that means the virtualfs wrapper only exists here and we just integrate it he
 One way to do it is to use the vfs instance to expose the memfs.
 
 The way `EXPORT_NAME` is supposed to be used is like `-s EXPORT_NAME="'Something'"`. Without the internal quotes, it won't work and will result in a compilation error. So apparently if you combine this with `MODULARIZE`, Emscripten will already place the whole thing into a function. However it still doesn't do ES6 modules properly, instead it's just a global function. It doesn't affect the CJS export, since it still going to use `Module`, it just assigns it also to the `EXPORT_NAME` object as well. So if you do this, then you need to change the initial `Module` variable. Furthermore, this name can then be used to create a `library_virtualfs.js` that knows where to get the right properties. Wait, that doesn't really matter, since you can always access `Module` and that gets aliases to whatever `EXPORT_NAME` to be. The main thing is that I want to be able to access a runtime parameter on the `Module` object that represents the implementation for the MEMFS. The way to do this is to proxy all of the functions to the parameter properties. We don't need to use `EXPORT_NAME` nor `MODULARIZE=1` until this is done: https://github.com/kripken/emscripten/pull/5569#issuecomment-328752028
+
+---
+
+```
+      // node is created from FS.FSNode
+      // which is passed parent, name, mode, rdev
+      // how to use VirtualFS inode?
+      // then FS.hashAddNode(node)
+      // FSNode is a function that constructs an object that...
+      // contains properties
+      // parent
+      // mount
+      // id
+      // name
+      // mode
+      // node_ops
+      // stream_ops
+      // rdev
+      // the prototype is another object that has
+      // read
+      // write
+      // isFolder
+      // isDevice
+      // the above are functions that also have get and set
+      // actually they are just properties that have special overloaded get and set functions
+      // ok so...
+      // the main idea is that we want to create inodes directly in vfs
+      // but how to do this?
+
+      // it does add the node to a hash table
+      // well name table
+      // that says that its hash is a hashName(node.parent.id, node.name)
+      // hashName appears to take the parent id and the name of the inode together to return a special number
+      // basically creating a hashtable
+      // instead of using a normal object
+      // even though they still use a normal object
+      // wtf?
+
+      // so the memfs seems weirdly intertwined with the `library_fs`
+      // that's one of the problems here
+      // where library_fs then represents the state with root tree objects
+
+      // we can access inode capabilites by using
+      // vfs._inodeMgr.createINode
+      // this gives us back an inode object
+      // that we can try to decorate with our own properties
+      // but the problem is that the actual state of the vfs is actually in
+      // library_fs...
+      // WTF
+
+      // ok so I realised that library_memfs is not even the only memory representation
+      // it just supplies relevant memory ops
+      // the library_fs is what actually stores the state
+      // so we if we abstract it at the level of library_fs
+      // then we only result in a problem where the state will be duplicated
+      // once inside vfs, and once inside the FS.root, FS.mounts, FS.nameTable
+      // see nameTable acts like an Array
+      // right they didn't use an object, they created their own hashtable here
+      // lol...
+
+      // it also appears to use `contents`
+      // that act like an array as well or an object not sure
+      // definitely object
+      // basically the usage of directories have a contents property
+      // that represents an object linking into the subsequent
+      // path
+
+      // the main key point is that by supplying your own virtualfs
+      // you'll need to maintain the state in FS without calling FS functions
+      // that means monkey patching its code too
+      // like FS.hashAddNode(name)
+      // where name is `'/'`
+
+      // usages of FS inside MEMFS:
+      // FS.createNode -> FS.hashAddNode
+      // FS.isFile
+      // FS.isDir
+      // FS.isLink
+      // FS.lookupNode -> uses FS.hashAddNode and the hashTable
+      // FS.genericErrors
+      // FS.ErrnoError
+
+      // there we go, the only thing we need to do is adapt into the hashAddNode
+      // in fact that should just work then
+
+      // the 2 uses of lookupNode occur in rename and rmdir
+      // so only these 2 map into lookupNode
+      // whereas the normal fs will try to read things itself
+
+      // there are multiple lookup implementations
+      // FS.lookupNode -> parent node and name returns the node
+      // FS.lookupPath -> path and options -> calls lookupNode at some point
+      // FS.lookup -> parent node and name returns...?
+
+      // OH i get it
+      // see lookupNode tries to use the nameTable inside FS
+      // but if it doesn't exist in nameTable which it considers a "cache"
+      // it tries to find it in the vfs
+      // meaning memfs or whatever rootfs implementation
+      // it goes through the node_ops.lookup
+      // the normal memfs uses lookup to just point to an error
+      // in our case, we're going to proxy that into vfs
+      // this means we don't need to call FS.createNode
+      // ok while that solves inode issues
+
+
+      // what about file descriptors
+      // it has a FS.streams array
+      // containing an array of fds
+      // then getStream functions acquires streams there
+      // that means we leave streams to the library_fs
+      // so memfs doesn't deal with it
+
+      // library_fs also maintains cwd for the internal emscripten module
+      // this is OK, think of it as a separate thread in a way
+
+      // what else is there?
+      // memory map
+      // this uses `_malloc`
+      // which is a call into the emscripten system that produces the length
+      // and returns a pointer into the heap array
+      // then the buffer is set with buffer.set(contents, ptr)
+      // this is not a nodejs buffer, what is it?
+
+      // the idea with a memory map is to take a file
+      // and map its contents into memory
+      // a similar thing can be done using our system as well
+      // it also assumes a stream, so it must be using a file descriptor for this
+```
+
+Ok I got the idea now, we only need to make sure not to use the FS name table when representing our files.
