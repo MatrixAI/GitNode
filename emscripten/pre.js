@@ -1,17 +1,17 @@
 // vfs: VirtualFS instance
 // there may be other parameters to add in the future
 // like socket implementation (to deal with different underlying engine)
-function LibGit (vfs) { // LibGit function header
+
+function LibGit ($VIRTUALFS) { // LibGit function header
 
   // this prevents explicit cjs exporting at shell.js
-  let module = undefined;
+  var module = undefined;
 
-  // we'll use a libgit namespace to avoid conflicts
+  // arguments is meant for command line arguments
+  // args is for module arguments provided as a function above
   var Module = {
-    thisProgram: 'virtualgit',
-    libgit: {
-      virtualfs: vfs
-    }
+    thisProgram: 'virtualfs',
+    $VIRTUALFS: $VIRTUALFS
   };
 
   // things that change according to environment:
