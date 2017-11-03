@@ -1159,3 +1159,318 @@ The way `EXPORT_NAME` is supposed to be used is like `-s EXPORT_NAME="'Something
 ```
 
 Ok I got the idea now, we only need to make sure not to use the FS name table when representing our files.
+
+I don't think we should be generating minified code for our system. The minification can take place later, however the usage of dead code elimination should still be applied. While optimisations can be done on the C -> Bitcode stage, the Bitcode to JS should only do dead code elimination not minification.
+
+---
+
+Just to recap. First we compile libgit2 into llvm bitcode. This is done via emcmake. Which first runs cmake to produce the necessary build files, and then the build files are executed. This produces a libgit2.bc code. It is not yet turned into JS. This is fine, because we intend to statically link into it and wrap the code with JS functions. The next step is to have a C wrapper that loads the header of the libgit2, and we compile this as well into the wrapper bitcode. This is because we can only expose C functions to JS if it is explicitly setup, there's no automatic detection of what functions we intend to use. So we use the emscripten C++ bind system to bind to functions there, all we need to do is write function headers apparently and some macros in this file, and all the capabilities will be exposed.
+
+Finally we have the JS and the bitcode and we put the together. This involves using the 2 previous outputted bitcode along with a monkeypatched MEMFS module that is done by using the `--js-library` option to embed our own virtualfs module into it. This involves assuming a global fs parameter is available to our virtualfs adapter, and then the whole thing is wrapped in prejs and postjs that turns our thing into a module. Of course we make sure to  also export the FS object, which is not our own FS, but the emscripten Fs object, we don't replace the entire FS object, we only replace the memfs system, that the FS object performs.
+
+Assuming it all works, the output is a JS file that acts like a CJS module. Although our wrapper can make it act like a ES6 module instead, if so, we'll have to use babel to turn it into a normal CJS module, while also exposing the ES6 module for usage. It doesn't really matter, since there's nothing to rollup, since we don't import anything anyway. As in there are no "npm dependencies here". Well except unless we use a buffer implementation anyway. Not really, why would we pass in a Buffer!?
+
+I guess I wonder if we really need the Buffer module when we can also just make sure that createINode when there's no data, we'll just create our own empty Buffer. Note that VFS package exposes this already. It exposes the Buffer system that it uses.
+
+One aspect is that the name of the virtualFs object will need to be macroized, so that it can be known what needs to be set in the prejs.
+
+On the otherhand, we'll just preset it right now to `virtualFs`.
+
+---
+
+```
+
+      // default directories gets created like
+      // /tmp
+      // /home
+      // /home/web_user
+      // what happens if those directories are already created!?
+
+      // createDefaultDirectories uses mkdir
+      // to create /tmp, /home, /home/web_user
+      // the mkdir is also in library_fs.js
+      // it calls FS.mknod
+      // so what happens if the directory is created
+      // mknod calls lookupPath
+      // the FS.mayCreate(parent, name)
+      // if err the throws new error
+      // if the node ops doesn't have mknod
+      // then there's an EPERM
+      // then it will call parent.node_ops.mknod
+      // so we are assuming that these directories don't exist
+      // we cannot use the normal
+
+      // so we already have this in vfs, but it appears we cannot actually use those
+      // then there's the createDefaultDevices
+      // which creates /dev/null
+      // and /dev/tty
+      // and more
+      // we don't have that, so that's left to emscripten to handle
+      // it would make sense in the future that emscripten integrates virtualfs and instead uses its device interface to implement things like tty
+      // also things like /dev/shm
+      // and /dev/shm/tmp
+
+      // also special directories is interesting, as it would rely instead on mounting special directories
+      // so virtualfs would need mounting capabilities, to add special filesystems like /proc and /sys
+```
+
+---
+
+Inside library_fs.js.
+
+We have a mount function. This function takes a type, opts and mountpoint. The MEMFS is what gets mounted first. This happens inside staticInit. This function is important, as we need to see what it expects.
+
+```
+FS.mount(MEMFS, {}, '/');
+```
+
+Note that MEMFS is the entire object defined inside `library_memfs.js` or soon `library_virtualfs.js`.
+
+```
+  var root = mountpoint === '/'; // true for MEMFS
+  var pseudo = !mountpoint; // false due to '/'
+  var node;
+
+  // if root is true, and we already have a root
+  // this is what prevents mounting things into root!
+  if (root && FS.root) {
+    throw new FS.ErrnoError(ERRNO_CODES.EBUSY);
+  } else if (!root && !pseudo) {
+    // if not root, this is not relevant, as we are not mounting anything other than root
+  }
+
+  var mount = {
+    type, opts, mountpoint, mounts
+  }
+
+  var mountRoot = type.mount(mount);
+  // in memfs, this mount object is discarded, and is not used
+  // we simply don't care to mount memfs within memfs
+  // so it's discarded
+
+  // so the node has a property which is mount, and this is assigned to the mount object above
+  mountRoot.mount = mount;
+  mount.root = mountRoot;
+  // mount's root prop is assigned to mountRoot, here we get a circular object
+
+
+  if (root) {
+    FS.root = mountRoot; // the root object is assigned to created root node from memfs
+  } else if (node) {
+    // not relevant because we are only mounting root
+  }
+
+  return mountRoot // so here we just return the root node
+
+```
+
+What does createNode in `library_fs` do?
+
+```
+
+  if (!FS.FSNode) {
+    FS.FSNode = ... // this is the constructor for a inode
+    // it represents an object that has a parent, mount, mounted, id (inode id)
+    // and name, mode and node_ops and stream_ops
+    // and rdev
+    // it alos has an empty prototype
+    // but then it is assigned with special functions that is
+    // read, write, isFolder, isDevice
+    // similar to the stat object that we have
+    // after assigning this constructor, we then run this
+    // and we pass it into hashAddNode(node)
+    // so there's a hashtable that maintains the list of inodes just like our iNodeMgr
+    // so we need to replace that instead
+  }
+
+```
+
+The createNode within `library_fs.js` runs hashAddNode, which does this:
+
+```
+  var hash = FS.hashName(node.parent.id, node.name)
+  node.name_next = FS.nameTable[hash]
+  FS.nameTable[hash] = node
+```
+
+So we get a hash, produced from the node's parent node, and the node name, and this hash is stuck into the `nameTable` which points to the node. While also `name_next` property is equal to where `FS.nameTable[hash]` is dervied, but if hash has never been assigned into `nameTable`. What does this give us? Isn't that weird?! HashName appears to be some sort of algorithm for hashtable production, so it takes this:
+
+```
+  var hash = 0;
+  for (var = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return ((parentid + hash) >>> 0) % FS.nameTable.length.
+```
+
+Where `hash`.
+
+Yea this is some sort of cache for all the nodes, just basically the same as using ES6 Map basically.
+
+Removing the node doesn't remove based on hash. Instead the hash is calculated again from the node itself. Then if the nameTable[hash] === node, oooo. Ok so the original value inside this nameTable appears to represent some sort of default value that has to be reset into it. It's an Array[4096]. Asking about what something is without first assigning it just returns undefined, so I guess it's just a weird way of assigning undefined to array values. Kind of weird isn't it. OOOOH I know, it's a way of handling conflicts, it's basically linked list style conflicts of the hash table. Still I think maybe I should replace the entire library_fs.js instead of dealing with this. But we'll need to handle alot of special cases.
+
+---
+
+```
+root
+mounts
+devices
+streams - array of fds
+nextInode
+nameTable
+currentPath
+initialized
+ignorePermissions
+trackingDelegate
+tracking
+ErrnoError
+genericErrors
+filesystems
+syncFSRequests
+handleFSError
+lookupPath
+getPath
+hashName - appears to only be used privately
+hashAddNode
+hashRemoveNode
+lookupNode - used by library_syscall.js
+createNode - creates an inode, just like how we do it with inodeMgr (but we do it explicitly via different construction methods, this is just the general method to how to construct it), used by sockfs, proxyfs, nodefs, lz4...
+destroyNode
+isRoot
+isMountpoint
+isFile
+isDir
+isLink
+isChrdev
+isBlkdev
+isFIFO
+isSocket
+
+PERMISSION STUFF:
+
+flagModes - only used within library_fs.js
+modeStringToFlags - used by sockfs
+flagsToPermissionString
+nodePermissions
+mayLookup
+mayCreate
+mayDelete
+mayOpen
+
+FD (stream implementation apparently)
+
+MAX_OPEN_FDS: 4096 (why do we even bother with this)
+nextFd
+getStream
+createStream
+closeStream
+
+DEVICES
+chrdev_stream_ops
+major
+minor
+makedev
+registerDevice
+getDevice
+
+CORE
+getMounts
+syncfs - foreach mount, it runs the mount.type.syncfs (which we just don't bother with)
+mount - does it for the root node, needs to exist, and we use this for actually initialising the VFS with the root node, in our case, calls to this just should launch an error
+umount - same launch an error
+lookup
+mknod
+create
+mkdir
+mkdirTree
+mkdev
+symlink
+rename
+rmdir
+readdir
+unlink
+readlink
+stat
+lstat
+chmod
+lchmod
+chown
+lchown
+fchown
+truncate
+ftruncate
+utime
+open
+close
+llseek
+read
+write
+allocate - what is this!? This is fallocate call (we don't have this in VFS atm, but it's used by syscall 324) for things that perform fallocate, ok we need a fallocate call in our VFS
+mmap - this is for memory mapping a file, very simple for us, we just get the buffer of the file
+munmap - nothing!?
+ioctl - Some streams support ioctls? I suppose for things like tty and stuff.
+readFile
+writeFile
+cwd
+chdir
+createDefaultDirectories - this should not be needed in our case, since we'll assume it's already created
+createDefaultDevices - this is more complicated, as we need to do things like TTY.register
+createSpecialDirectories
+createStandardStreams
+ensureErrnoError
+staticInit
+quit
+
+V1 compatibility functions
+getMode
+joinPath
+absolutePath
+standardizePath
+analyzePath
+createFolder
+createPath
+createDataFile
+createDevice
+createLink
+forceLoadFile
+createLazyFile
+createPreloadedFile
+// ALL OF THIS ABOVE FUNCTIONS DO NOT NEED TO BE IMPLEMENTED
+
+PERSISTENCE
+indexedDB
+DB_NAME
+DB_VERSION
+DB_STORE_NAME
+saveFilesToDB
+loadFilesFromDB
+//ALL OF THIS ABOVE DO NOT NEED TO BE IMPLEMENTED
+// we don't really need this.
+// so the only ones needed are to line 1400
+```
+
+We have to assume all is public to be able to replace the library_fs.js
+
+And because of the way this thing is structured, the only way to make these functions work is by having them public. We'll have to search for parts that are not used by other libraries.
+
+Also this assumes mounting, but we also could just eliminate mounting as an option altogether.
+
+Some of those functions are intended to work on just modes. But really we should be punting them into the stat system. That is we just use the constants as defined in JS. The class requires it object to be created and then does things like that, I suppose somethings will need to be used again. Sucks!
+
+It's mentioned that the FD public API is in the Advanced Fielsystem API. It appears that nextFd is used to actaully get them a fd number, then that's used for the purpose of creating fds, I have a better way to do this using our js-resource-counter. Of course this whole thing is a bit stupid, especially with the way libraries are constructed.
+
+Also how do we propropagate errors? We'll need to wrap all VFS errors into the FS.ErrnoError system instead.
+
+There's an assumption that these calls are all asynchronous right? No it is expected to be a synchronous interface, because that's what posix C programs expect.
+
+What about things like /proc/self/fd, the way that library_fs.js deals with this is hijacking the lookup function for the inode of /proc/self/fd, such that finding things leads to finding one of the possible file descriptors. It does `var fd = +name;`, which turns the name into a file descriptor number, and we lookup that number. How do we manage that!? In the linux system, the /proc filesystem is a special system mounted onto it, it has special features, but the main point that is that inside /proc/self/fd, each is a symlink to some other thing like /dev/pts/0, and sometimes they are just socket inodes instead. It is not a normal filesystem.
+
+Ok so the only tough things to figure out is the proc system and the tty devices, everything else can be replaced with VirtualFS. The idea is to remove MEMFS and remove the concepts of mounting. I don't think sockfs matters, so we're not going to try to implement mounting in that way.
+
+Do we need ignorePermissions, I don't think so, this is because we are starting as root, and we don't change the uid. In terms of ignoring permissions, the system seems to use this in order to know whether it can just call some call to create or change thing sin the FS.
+
+Does that make sense in our system? Root can always do everything so all permissions are ignored while in root anyway. Wait so the idea is that the user is the `web_user`. And it's home is `/home/web_user`, and this is where the permissions matter, since the idea is that the web user will have a specific id that will be used. That's why we need to ignore permissions for the moment, and that the creation of things would have an owner right? Owner is always 0 and 0. It's always root here. What we can do is make ignorePermissions mean that root is currently set to the user, and then change users. Or it doesn't matter, the uid and gid is always root, and and that the current user is always web_user, but that's just its name really. The root user could have a home, so it's fine.
+
+We also don't need multiple inflight sync requests, they are noops anyway.
+
+The main idea is that calls still result in things like node operations. Wait the stream nodes are still used in a way, that, there exists a concept call the stream object, and that this is delivered to the end user in order to do things. Oooohh, this is going to be difficult!
