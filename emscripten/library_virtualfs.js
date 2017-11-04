@@ -21,8 +21,7 @@
 // but within this, it needs to expose all of the types and constructors as well
 
 // expect variables in context:
-// VirtualFS
-// Buffer
+// virtualFs
 
 mergeInto(LibraryManager.library, {
   $MEMFS__deps: ['$FS'],
@@ -101,7 +100,7 @@ mergeInto(LibraryManager.library, {
       } else if (FS.isFile(mode)) {
         inode = VirtualFS.fs._inodeMgr.createINode(
           VirtualFS.File,
-          { mode: mode, data: Buffer.allocUnsafe(0) }
+          { mode: mode }
         );
       } else if (FS.isLink(mode)) {
         inode = VirtualFS.fs._inodeMgr.createINode(

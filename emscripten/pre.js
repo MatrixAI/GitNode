@@ -4,8 +4,9 @@
 
 // this needs a Buffer implementation as well
 
+// remember classes are captialised, objects are not
 
-function LibGit (VirtualFS, Buffer) { // LibGit function header
+function LibGit (virtualFs) { // LibGit function header
 
   // this prevents explicit cjs exporting at shell.js
   var module = undefined;

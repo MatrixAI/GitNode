@@ -1474,3 +1474,101 @@ Does that make sense in our system? Root can always do everything so all permiss
 We also don't need multiple inflight sync requests, they are noops anyway.
 
 The main idea is that calls still result in things like node operations. Wait the stream nodes are still used in a way, that, there exists a concept call the stream object, and that this is delivered to the end user in order to do things. Oooohh, this is going to be difficult!
+
+For the proc self fd issue, this can be done by overloading the directory inode and still using it there. That would allow us to just display all of the streams directly via the readdir or the contents of the directory, that's simple.
+
+For the TTY services, this may require building a device interface and registering it, although I'm not sure if this is how it works. For the rest, this may requires wrapping up the objects returned to the system to match the same interface.
+
+Let's investigate how the TTY system works.
+
+```js
+TTY.register(FS.makedev(5, 0), TTY.default_tty_ops);
+TTY.register(FS.makedev(6, 0), TTY.default_tty1_ops);
+FS.mkdev('/dev/tty', FS.makedev(5, 0));
+FS.mkdev('/dev/tty1', FS.makedev(6, 0));
+```
+
+So the function `makedev` just returns the number combination. It represents the major and minor joined together, so `/dev/tty` and `/dev/tty1` are on different major devices. On linux I instead have `5,0` and `4,1` for tty and tty1 respectively. Both are character special files. With tty with 0o666 and tty1 iwth 0o620. So /dev/tty is actually outputting to the stdout of the terminal. It represents the controlling terminal for the current process. So does every process have a controlling terminal? What happens if it is ran under X or some other system!? Oh not every process has a controlling terminal, so it may not exist for a given process.
+
+```
+# these are symlinks
+/dev/stdin -> /proc/self/fd/0
+/dev/stdout ->  /proc/self/fd/1
+/dev/stderr -> /proc/self/fd/2
+```
+
+The `/dev/tty` is not a symlink, but it does represent the same tty as when you run `tty` whixh reports things like `/dev/pts/1`. Also owned by the gid 3 that is tty.
+
+The manual does state that `/dev/tty` is a character device 5 0 with mode 0o666 and owned by the group tty, we don't have a group tty so I don't think it matters. It's a "synonym", so that's probably some legacy thing since it's not a symlink. It supports ioctl calls. Does emscripten point this into the JS console, that is it's tty is the actual JS console!?
+
+The emscripten on create standard streams does this:
+
+```
+FS.symlink('/dev/tty', '/dev/stdin');
+FS.symlink('/dev/tty', '/dev/stdout');
+FS.symlink('/dev/tty1', '/dev/stdout');
+```
+
+Notice that what happens is that stdin and stdout are actually linked to /dev/tty so that reading and writing comes from the controlling terminal. But stderr goes to the other tty1.
+
+However this only happens if stdin and stdout and stderr are not overridden in the Module object, which you can override and point the stdin and stdout and stderr to somewhere else. In that case, it instead usese `FS.createDevice`.
+
+```
+FS.createDevice('/dev', 'stdin', Module['stdin'])
+FS.createDevice('/dev', 'stdout', null, Module['stdout'])
+FS.createDevice('/dev', 'stderr', null, Module['stderr'])
+```
+
+The createDevice function is a v1 compatibility function that that registers a device using the given functions, notice that it takes a directory, the name of the element within that directory, then an input function and an output function. The registration of the device is done via an object that has open, close, read, and write. And returns with the `mkdev` call.
+
+```
+makedev -> Just get the device major and minor combo
+createDevice -> Create a device with specified input and output functions, and register it with an object interface matching a device operations
+mkdev -> runs mknod so it creates the actual device on the filesystem instead of just registering it
+registerDevive -> Assign into the FS.devices array with an object containing stream operations
+```
+
+According to emscripten, the stdin is by default reading from the temrinal in the command line or using window.prompt in browsers, in both cases with line buffering, while stdout is using print where defined with line buffering and stderr with the same output function as stdout. Is this is what /dev/tty also defined with!?
+
+The `FS.init` function comes with input, output and error parameters that represent callbacks that are called. So input callback are called with no parameters when the program attempts to read from stdin, it should return an ascii character code when data is avaialbe or null when it isn't. Oh so these are just triggering callbacks. These are callbacks to trigger input or output, not exactly done for actual reading or writing things, since you don't have access to the data. So window.prompt() will always give back a newline or something!? Note that console.log always adds a newline to the end of the string. Compare with things like `process.stdout.write` which writes without a newline. Wait this doesn't make sense, the `init` would assign the passed input and output and error callbacks into `Module['stdin']` or whatever, and only assign existing `Module['stdin']` if it wasn't passed back, this means these things are getting assigned unless these were first undefined, and so they would be created as devices then these callbacks!?
+
+If you reassign the input, output and error, that only affects `/dev/stdin` and stuff, but not the `/dev/tty` and `/dev/tty1`, so what does this all mean? I get it, it's part of `library_tty`. By default nothing is set in `Module.stdin` and friends, so it uses the tty system, which I just searched does make the use of things like `window_prompt`.
+
+I get the feeling this could be implemented with our device interface, we could just create one that makes use of the console instead. But since we are reading from the controlling terminal, being able to use in the browser means using things like window.prompt or whatever. Or we ditch browser compatibility for now.
+
+It appears the on Linux, the /dev/tty is used to display both stdout and stderr. It appears that on Linux, the ttyXX is used for virtual consoles. That is things like X displays. Or even the Linux console. My X is running on `tty7`. I can see this:
+
+```
+tty1 -> kmscon (Linux Kernel Virtual Console)
+tty7 -> X Virtual Console
+```
+
+There are other terminals, but not assigned to programs. Now also I have `/dev/pts`, these are assigned to pseudo terminals, that is Konsole running inside the X Virtual Console. So they are placed inside `/dev/pts`, but this convention rather than any technology constraint or standard.
+
+Processes that don't have a controlling terminal is not subject to receiving job control related signals from terminal events. These processes would then not have access to `/dev/tty`. So this only really makes sense for single process systems, if we have always `/dev/tty`, otherwise we'd need to create mounting functionality and create a custom FS just for dev. So you cannot get SIGINT, unless another process explicitly sent it with the kill syscall.
+
+If a process that is not a session leader opens a terminal file or that `O_NOCTTY` options is used, then that terminal shall not become the controlling terminal of the calling process. When a controlling terminal becomes associated with a session, its foreground process group shall be set to the process group of the session leader.
+
+The controlling terminal is inherited by child processes during the fork call. A process relinquishes its controlling terminal when it creates a new session with the setsid function, other processes remaining in the old session continue to have it. Upon the close of the last fd in the system, whether not it is int he current session.
+
+A process does not relinquish its controlling terminal simply by closing all of its file descriptors associated with the controlling terminal if other processes continue to have it open.
+
+When a controlling process terminates, the controlling terminal is dissociated from the current session, allowing it to be acquired by a new session leader. Subsequent access to the terminal by other processes in the earlier session may be denied, with attempts to access the terminal treated as if a modem disconnect had been sensed.
+
+Ok so why does emscripten use /dev/tty1 as its stderr, when /dev/tty appears to support the ability to do stderr (but I'm not sure how this works atm). Also there's no `/dev/tty0` atm.
+
+In JS we assume only 1 program, so only 1 terminal should be neccessary with its stdin and stdout relegated to things like console.log and console input. If you do `ll /proc/self/fd` it shows that 0, 1 and 2 are all symlinks to the same terminal device that is: `/dev/pts/4`. So the same terminal handles all the std streams, but how does the device know whether it's intended for stdout or stdin and stderr? Well it's easy, remember that the device is special, it can remember all the streams opned on it, so we can say that the first stream opened is always stdin, and the second is always stdout and the third is always stderr, and then prevent any other descriptors opened on the terminal. Or all subsequent ones are relegated to be stdout streams. Wait but we also know that some fds are read/write, so I guess both are relegated to stdin and stdout. Or perhaps there's another way to open the terminal device and specify that it should be the stderr.
+
+Oh this is how it works! The getty thin gwould open a fd to the tty device with read/write permissions, then dup it twice to get 0,1,2. Then it would run some commands either fcntl or ioctl or something else to make 0 stdin, 1 stdout and 2 stderr!? Note that stdin is actually accepting writes too! Wait are we saying that stdout can also be read from!? A recommended UNIX programming methodology is to always use stderr for reporting message sor prompting the user for more input instead of stdin or stdout due to the fact that these 2 can be redirected! HOWEVER it is infact also possible to just call `ctermid(3)` just like `tty(1)` to get the actual controlling terminal, and if there exists, you can always ask the user for more input and output status messages there. But for simple usage, you just use stderr. Like imagine a program: `programA | programB | programC`, if programB wanted to get some prompt it could by asking stderr!
+
+Ok this shows us that we only need `/dev/tty`. Because stdin, stdout and stderr are all pointing to it. And can all read and write. There's no limitation on read/writing on stdin, stdout and stderr. All are duplicated file descriptors, it's at this point we should expose the dup call, and see how it works with FdMgr. In fact we can even supply our own `/dev/tty`, that just also uses console.log or window.prompt or whatever. It has to use readline in Nodejs or just stdin really of node.
+
+Ok I know now, /dev/tty is the current tty device, while /dev/tty0 is the current virtual console, while /dev/console is the system console. This means /dev/tty0 is actually the /dev/tty7 when I'm in X. While /dev/console is probably pointing to /dev/tty1. So both /dev/console and /dev/tty0 is irrelevant for our purposes. Note for virtual consoles that are not the X server, you can use them like you can use the pseudo terminals like /dev/pts/*.
+
+/dev/console is a virtual set of devices which can be set as a parameter at boot time. It might be redirected to a serial device or a virtual console and by default points to /dev/tty0. When multiple console= options are passed to the kernel, the console output will go to more than one device.
+
+/dev/tty is kind of an alias to the console (physical, virtual or pseudo device, if any) associated to the process that open it. Unlike the other devices, you do not need root privileges to write to it. Note also that processes like the ones launched by cron and similar batch processes have no usable /dev/tty, as they aren't associated with any. These processes have a ? in the TTY column of ps -ef output.
+
+Right so /dev/console doesn't matter to VFS. Most times it points to /dev/tty0, which is the virtual console, which we don't care about. Wait, if tty0 is the current virtual console, and /dev/tty points to the current console (whether its physical, virtual or pseudo), then both devices should exist and just point to the JS console.
+
+We still need fallocate. But yes we should create these extra devices in VFS.
