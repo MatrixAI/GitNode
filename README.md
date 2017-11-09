@@ -1532,17 +1532,6 @@ According to emscripten, the stdin is by default reading from the temrinal in th
 
 The `FS.init` function comes with input, output and error parameters that represent callbacks that are called. So input callback are called with no parameters when the program attempts to read from stdin, it should return an ascii character code when data is avaialbe or null when it isn't. Oh so these are just triggering callbacks. These are callbacks to trigger input or output, not exactly done for actual reading or writing things, since you don't have access to the data. So window.prompt() will always give back a newline or something!? Note that console.log always adds a newline to the end of the string. Compare with things like `process.stdout.write` which writes without a newline. Wait this doesn't make sense, the `init` would assign the passed input and output and error callbacks into `Module['stdin']` or whatever, and only assign existing `Module['stdin']` if it wasn't passed back, this means these things are getting assigned unless these were first undefined, and so they would be created as devices then these callbacks!?
 
-If you reassign the input, output and error, that only affects `/dev/stdin` and stuff, but not the `/dev/tty` and `/dev/tty1`, so what does this all mean? I get it, it's part of `library_tty`. By default nothing is set in `Module.stdin` and friends, so it uses the tty system, which I just searched does make the use of things like `window_prompt`.
-
-I get the feeling this could be implemented with our device interface, we could just create one that makes use of the console instead. But since we are reading from the controlling terminal, being able to use in the browser means using things like window.prompt or whatever. Or we ditch browser compatibility for now.
-
-It appears the on Linux, the /dev/tty is used to display both stdout and stderr. It appears that on Linux, the ttyXX is used for virtual consoles. That is things like X displays. Or even the Linux console. My X is running on `tty7`. I can see this:
-
-```
-tty1 -> kmscon (Linux Kernel Virtual Console)
-tty7 -> X Virtual Console
-```
-
 There are other terminals, but not assigned to programs. Now also I have `/dev/pts`, these are assigned to pseudo terminals, that is Konsole running inside the X Virtual Console. So they are placed inside `/dev/pts`, but this convention rather than any technology constraint or standard.
 
 Processes that don't have a controlling terminal is not subject to receiving job control related signals from terminal events. These processes would then not have access to `/dev/tty`. So this only really makes sense for single process systems, if we have always `/dev/tty`, otherwise we'd need to create mounting functionality and create a custom FS just for dev. So you cannot get SIGINT, unless another process explicitly sent it with the kill syscall.
@@ -1559,16 +1548,277 @@ Ok so why does emscripten use /dev/tty1 as its stderr, when /dev/tty appears to 
 
 In JS we assume only 1 program, so only 1 terminal should be neccessary with its stdin and stdout relegated to things like console.log and console input. If you do `ll /proc/self/fd` it shows that 0, 1 and 2 are all symlinks to the same terminal device that is: `/dev/pts/4`. So the same terminal handles all the std streams, but how does the device know whether it's intended for stdout or stdin and stderr? Well it's easy, remember that the device is special, it can remember all the streams opned on it, so we can say that the first stream opened is always stdin, and the second is always stdout and the third is always stderr, and then prevent any other descriptors opened on the terminal. Or all subsequent ones are relegated to be stdout streams. Wait but we also know that some fds are read/write, so I guess both are relegated to stdin and stdout. Or perhaps there's another way to open the terminal device and specify that it should be the stderr.
 
-Oh this is how it works! The getty thin gwould open a fd to the tty device with read/write permissions, then dup it twice to get 0,1,2. Then it would run some commands either fcntl or ioctl or something else to make 0 stdin, 1 stdout and 2 stderr!? Note that stdin is actually accepting writes too! Wait are we saying that stdout can also be read from!? A recommended UNIX programming methodology is to always use stderr for reporting message sor prompting the user for more input instead of stdin or stdout due to the fact that these 2 can be redirected! HOWEVER it is infact also possible to just call `ctermid(3)` just like `tty(1)` to get the actual controlling terminal, and if there exists, you can always ask the user for more input and output status messages there. But for simple usage, you just use stderr. Like imagine a program: `programA | programB | programC`, if programB wanted to get some prompt it could by asking stderr!
+http://devosoft.org/an-introduction-to-web-development-with-emscripten/
 
-Ok this shows us that we only need `/dev/tty`. Because stdin, stdout and stderr are all pointing to it. And can all read and write. There's no limitation on read/writing on stdin, stdout and stderr. All are duplicated file descriptors, it's at this point we should expose the dup call, and see how it works with FdMgr. In fact we can even supply our own `/dev/tty`, that just also uses console.log or window.prompt or whatever. It has to use readline in Nodejs or just stdin really of node.
+https://kripken.github.io/emscripten-site/docs/api_reference/advanced-apis.html
 
-Ok I know now, /dev/tty is the current tty device, while /dev/tty0 is the current virtual console, while /dev/console is the system console. This means /dev/tty0 is actually the /dev/tty7 when I'm in X. While /dev/console is probably pointing to /dev/tty1. So both /dev/console and /dev/tty0 is irrelevant for our purposes. Note for virtual consoles that are not the X server, you can use them like you can use the pseudo terminals like /dev/pts/*.
+https://stackoverflow.com/questions/14063046/fallocate-vs-posix-fallocate
 
-/dev/console is a virtual set of devices which can be set as a parameter at boot time. It might be redirected to a serial device or a virtual console and by default points to /dev/tty0. When multiple console= options are passed to the kernel, the console output will go to more than one device.
+http://kapadia.github.io/emscripten/2013/09/13/emscripten-pointers-and-pointers.html
 
-/dev/tty is kind of an alias to the console (physical, virtual or pseudo device, if any) associated to the process that open it. Unlike the other devices, you do not need root privileges to write to it. Note also that processes like the ones launched by cron and similar batch processes have no usable /dev/tty, as they aren't associated with any. These processes have a ? in the TTY column of ps -ef output.
+https://github.com/Planeshifter/emscripten-examples/tree/master/01_PassingArrays
 
-Right so /dev/console doesn't matter to VFS. Most times it points to /dev/tty0, which is the virtual console, which we don't care about. Wait, if tty0 is the current virtual console, and /dev/tty points to the current console (whether its physical, virtual or pseudo), then both devices should exist and just point to the JS console.
+---
 
-We still need fallocate. But yes we should create these extra devices in VFS.
+And mmap and munmap and ioctl, and maybe dup calls as well.
+
+We're replacing the whole system with our own library_fs.js, we'll need to have the equivalent in semantics for a number of the functions.
+
+So mmap uses the HEAPU8, which is the total memory set that being used by emscripten. So the idea is to map a file data into a section of memory into that area, such that mutations that area in HEAPU8 will directly map to changes within the file. How is this achieved?
+
+Here is how it is used:
+
+```
+var info = FS.getStream(fd); // a stream object
+if (!info) return -ERRNO_CODES.EBADF;
+var res = FS.mmap(info, HEAPU8, addr, len, off, prot, flags);
+ptr = res.ptr;
+allocated = res.allocated;
+SYSCALLS.mappings[ptr] = {
+  malloc: ptr,
+  len: len,
+  allocated: allocated,
+  fd: fd,
+  flags: flags;
+};
+return ptr;
+```
+
+That is in `library_syscalls.js`, what this seems to show is that a fd is already passed in, then an area within memory is passed in, and also things like, addr into that HEAPU8, and length, prototocl and flags.
+
+The official mmap call is `pa = mmap(addr, len, prot, flags, fildes, off)`.
+
+What does it actually do!? The HEAPU8 is the process address space and in C, that's implicit it appears?
+
+pa is the address of the mmaped data. So whatever pa is the pointer into the process memory.
+
+From pa to len, will be a legitimate address space mapped from the file. The range of bytes starting at off and continuing for len bytes, will be legimiate for the possible offsets in the file or shared memory object represented by the fildes.
+
+The mapping established replaces any previous mapping for those whole pages containing any part of the address space of the process starting at pa and continuing for len bytes. How do mismatched offsets work here?
+
+If the size of the mapped file changes after the call to mmap, as a result of some other operation on the mapped file, the effect of references to portions of the mapped region that correspond to added or removed portions of the file is unspecified.
+
+The mmap is supported for regular files and shared memory objects.
+
+The parameter prot determines whether read, write or execute or combination of it is permitted on the data being mapped. The pro should either be `PROT_NONE` or the bitwise inclusive OR of one or more of the flags. What does it mean to be able to execute the data? Is it to jump into some area inmemory and execute the code there? That would mean mapping into an execute machine code, but that doesn't make sense, since what about the linker and everythign!? Regardless of these prot options, the fildes will always need a read capability, since you need to read the data into memory. There's also options which contain shared, private or fixed. If you specify shared, prot write doesn't require a write permission.
+
+If shared is specified, writes change the underlying object. If private is specified, modifications to the mapped data is  only visible to the calling process and is not reflected onto the file. It is unspecified whether modifications to the underlying object done after map private is visible through the map private mapping. The mapping is retained across forks.
+
+If map fixed, then the value of pa must be addr exactly. If map fixed, mmap may return map failed and set errno to EINVAL. If fixed is not specified, the addr is in used in some way to arrive at the returned pointer pa. The implementation figures out where to set the pa. An addr valueo f 0 means the implementation can choose anywhere. A non-zero value is taken to be a suggestion. So without setting it, then pa is never set to 0, nor does it ever conflict with any other mapping. Off argument has to be aligned according to the sysconf pagesize. mmap adds extra references to the file associated with the fildes, which is not removed by close on the fd, this reference is only removed when there are no more mappings to the file. Atime is updated. Ctime and mtime for shared and prot write will be marked for update at some point between a referenced write and the next call to msync. Without msync, the sync takes place at the discretion of the implementation.
+
+Does it make sense to eve nuse shared here? I guess you can map the changes back into disk.
+
+Library memfs checks that if the flag IS NOT `MAP_PRIVATE` and that the contents of the inode is === to the buffer or buffer.buffer, then allocated = false and ptr = contents.byteOffset. So actually in fact, that `MAP_PRIVATE` is supported, and what we get is new piece of memory equal to the duplication of the previous buffer, like `Buffer.from(buffer)`. Except that it uses a raw typed array instead of Node buffers. So yes, private mapping is easy, it's just really give you back a buffer. The problem is that this is heap dependent, vfs has no concept of a global heap address space, this is emscripten. So emscripten fs wrapper will need to supply this concept. There's a comment that says that they cannot emulate `MAP_SHARED` because the file is not backed by the buffer. What does that mean?
+
+So HEAPU8 is a uint8array. And the mmap call relies on this as the total set of memory to map into.
+
+This is because in JS, we don't get direct access to the memory details.
+
+It's also true we cannot create a contiguous view into non-contiguous memory maps. So we cannot just take it, and expect it to work. The kernel actually has a page based data structure that maintains a mapping from virtual pages to physical memory, and thus can periodically choose to synchronise dirty pages to the physical disk. However we cannot do this with just a uint8array, since this is just a plain view into an arraybuffer that is immutable, and there is no page based data structure embedded into it that we can hook into. Instead emscripten must use some sort of external data structure to maintain mappings, and that's why it may not make sense to expose a mmap call on the vfs, as we cannot do it exactly, unless the API can be left to the implementation to implement, basically there is no automatic synchronisation that can occur, instead mmap syscall is meant to return a pointer to where the mapped memory starts, and that's it. Now it's up to whoever calls to maintain that synchronisation.
+
+For now I need to check how emscripten does this.
+
+This is what library memfs does:
+
+```
+function mmap (stream, offset, length, position, prot, flags) {
+
+  var ptr;
+  var allocated;
+  var contents = stream.node.contents;
+
+  // is contents intended to be a uint8array as well
+  // are we say that he contents of the file are in the same heap buffer
+  // and that the uint8array is just a view/slice into an existing array buffer?
+
+  // this is now impossible in VFS, as the fs files are never stored in the HEAPU8 global buffer
+  // because of this, when mmap of MAP_SHARED is used, it's irrelevant
+  // because the contents of the file is stored in the same HEAPU8 buffer
+  // this means allocated = false
+  // and the returned pa address or ptry in this case is the just the byteOffset of the file content
+  // which points back into the HEAPU8
+  // that it is an index back into HEAPU8
+  // the byteOffset of the contents is the pointer into HEAPU8 where the file
+  // exists
+  // this means with MAP_SHARED if the contents.buffer is in the same buffer
+  // then there is no need of synchronisation of memory pages
+  // IT IS THE SAME MEMORY!
+  if (!(flags & MAP_PRIVATE) && (contents.buffer === HEAPU8.buffer)) {
+    allocated = false;
+    ptr = contents.byteOffset;
+  } else {
+
+    // this means either it is MAP_PRIVATE
+    // or that it is MAP_SHARED
+    // but with the contents.buffer somewhere else
+    // note that this means that NODE_FS doesn't support this
+    // remember mmap is supplied on the stream_ops
+    // so other impls can override and supply their own implementation of mmap
+
+    if (position > 0 || position + length < stream.node.usedBytes) {
+
+      // this is just slicing stuff
+      // and placing it into the contents array
+      if (contents.subarray) {
+        contents = contents.subarray(position, position + length);
+      } else {
+        contents = Array.prototype.slice.call(contents, position, position + length);
+      }
+
+      // see how it reassigns the memory into the HEAPU8
+      // and it gets that exact length
+      allocated = true;
+      ptr = _malloc(length);
+      if (!ptr) {
+        throw new ENOMEM;
+      }
+      HEAPU8.set(contents, ptr);
+
+    }
+
+  }
+
+
+}
+```
+
+They are removing the buffer argument, since it's a global and it's always the same.
+
+A uint8array can be a view into an existing buffer. That it is possible to do this:
+
+```
+new Uint8Array(arraybuffer, byteOffset, length);
+```
+
+As you can see it's possible to create a uint8array (a view) into a subsection of an array buffer. So then it is possible to ask whether the content or unint8array's buffer the same as the global HEAPU8 buffer, which is a view into the entire buffer totally.
+
+Node's underlying buffer implementation is also an ArrayBuffer. IF you use `Buffer.from('abc').buffer`, it gives you the ArrayBuffer. So that's pretty cool. It means it's simple to convert from Buffer to ArrayBuffer. This also means it's possible to convert a typed array to a node buffer simply by converting its underlying buffer.
+
+```
+buf = Buffer.from(array.buffer);
+buf = buf.slice(array.byteOffset, array.byteOffset + array.byteLength)
+```
+
+Note how that the array may be a view into a larger buffer. Doing this avoids needing to do anything else. And since Buffers also contain ArrayBuffers, it all just works. How funny.
+Oh shit we don't need that extra dependency, it's possible to just do it directly from the buffer itself. Note that ArrayBuffer can't be converted directly into Buffer without first doing the Buffer creation.
+
+That means we that memfs's files are stored in the same HEAPU8, that's why they are checking if the underlying buffer is the same buffer. Now with VFS, this is impossible, since our content is stored in independent buffers, not as part of the HEAPU8. (Not sure why this was done in the first place.).
+
+If the stream ops doesn't have the mmap call, then library_fs.js just returns ENODEV. This is what happens when nodefs is used.
+
+What this means is that Emscripten is not emulating `MAP_SHARED` when the file contents is not actually backed by the same HEAPU8. It only emulates `MAP_SHARED` when the file contents is on the same HEAPU8. But that's ok, becuase that's how `memfs` works, it puts all of its file contents into the same HEAPU8.
+
+So if it isn't or that `MAP_PRIVATE` is selected, then it just creates a new section of memory inside `HEAPU8` by using `_malloc`. And copying a slice of that file contents buffer into there.
+
+So there isn't any kind of dirty paging system being used by the emscripten, it just isn't supported, or it is, because it's same memory. Also the msync in librarymemfs is actually redundant, because if it's hitting memfs, that would mean that the memory is the same anyway, so there's no need to actually perform a write to the file descriptor.
+
+It's also true that the offset into HEAPU8 is ignored, just like for mmap that the addr is usually supposed to just be 0, and that it allows the implementation to find where to store things.
+
+The length of memory mmapped is still relevant, cause that tells us how much of the memory to actually create or allocate if it is shared. Note that for the traditional mmap call.
+
+The official mmap call is `pa = mmap(addr, len, prot, flags, fildes, off)`.
+
+```
+EMSCRIPTEN <> POSIX
+offset        addr - suggested location to use for mmap
+length        len  - length of the mapped bytes (should be pagesize)
+position      off  - offset into the file to start mapping from
+prot          prot
+flags         flags
+```
+
+So the position of the parameters is different.
+
+Ok since we are replacing library_fs itself, we have the free reign to consider HEAPU8 as that's where we need to assign into. While also considering offset, length and position. In our case we'll also forget about the assigned addr, as it's just a suggestion. The length and position may matter, well length depends on the HEAPU8 as well, since our file contents is never inside the HEAPU8 by default, then the length matters, and position matters as well, since we are going to be offsetting from the file. Now we can get the internal buffer of the file, which is a reference, by adding a new call that returns the original buffer.
+
+Still how are we going to do `MAP_SHARED`?
+
+Let's look at the fact that on the syscall implementation, it will do something like:
+
+```
+SYSCALLS.mappings[ptr] = {
+  malloc: ptr,
+  len: len,
+  allocated: allocated,
+  fd: fd,
+  flags: flags
+};
+```
+
+So it's definitely storing those mappings, how does it know how to synchronise them?
+
+I see it getting used in the munmap implementation, that just before munmap finishes, a `msync` is called. Ok so munmap will force an msync. And from memory, exist should also enforce everything getting synchronised, but I don't see it being used right now.
+
+In linux even if the user process is destroyed, the kernel will handle flushing the dirty pages. So it's really part of process termination. So even if munmap will actually perform msync in Emscripten, there's nothing calling msync on process termination. Especially since JS apps have no concept of process termination. And if we don't get an automatic change to the underlying buffer in VFS, then we will never get a change. I wonder if you mmap and make a change without msync and then read the file contents from within the same process, do you read your writes?
+
+But the fact that `SYSCALL.mappings` exist is a good sign, it means we can create some sort of backthread event that performs a periodic synchronisation, or a synchronisation of dirty pages somehow, there's nothing marking that a page is dirty or not however. But we can add it in, since we control `library_fs.js`. Nothing else uses it, so we can maintain our own mapping. So we can use a data structure with tagging, every time we write to a mapping, we mark it as dirty. But wait, how do you actually know whether a write occurred, this all happens inside uint8array. Which means changes are just made to the HEAPU8 buffer, how do you actually know whether a write occurred. You would need a JS proxy object on Uint8Array.
+
+There is the `Module['buffer']` that is used from all the HEAPU8 and HEAPU16... etc are all derived from `Module['buffer']`. We are assuming that the buffer is an ArrayBuffer.
+
+It's possible to do this with the option `ALLOW_MEMORY_SHARING` that anables you to specify `Module['buffer']` before the program runs, and everything will use that buffer. The base of memor yis defined by `GLOBAL_BASE` at compile time. Could this be used to create a ArrayBuffer base that supports the ability to stitch together non-contiguous buffers? Sharing a single buffer, still it's seems pretty complicated, can we use something simpler?
+
+It might be possible to instead proxy the ArrayBuffer. Such that accesses against the ArrayBuffer gets understood. But there is no access directly to the ArrayBuffer, it is all mediated via `Uint8Array`. This is not the same as the Buffer object itself. And we can't override `HEAPU8` we can only do it for `ArrayBuffer`. Seems like it is possible to do it on a Uin8Array. Are we really going to do this for HEAPU8? Apparently it is possible to proxy a unit8array and then pass its internal buffer property, will this still preserve all sorts of proxying functionality!? I don't thik it can work. There are just methods to run on the ArrayBuffer that we can proxy.
+
+Wait according to posix: "The effect of changing the size of the underlying file of a mapping on the pages that correspond to added or removed regions of the file is unspecified".
+
+Ok we are going to give up trying to create mmap for `MAP_SHARED`, it's just impossible in our case!
+
+```
+  // we cannot emulate the semantics of MAP_SHARED
+  // the buffer reference would not be maintained through other writes
+  // this is because we don't have the concept of a page table
+  // and writes create a whole new buffer reference
+  // to properly emulate MAP_SHARED, you need the page table
+```
+
+Then this page table would mediate synchronisation between the pages in virtual memory, and the disk memory, by accessing the inode's buffer and properly using the offsets into the inode buffer.
+
+---
+
+OH SHIT... libgit2 uses `MAP_SHARED`.
+
+Ok there's only one place that is an issue that cannot be done just by using `NO_MMAP` constant. That's the function `write_at` that uses `GIT_PROT_WRITE` and `GIT_MAP_SHARED`, since if it's not write, you can just use private mapping anyway. So who calls this function? This basically gets used all across `indexer.c`. Without a mmap implementation that allows write access, I don't think the indexer works. It's all here: https://github.com/libgit2/libgit2/issues/4376
+
+OH MAN... why...
+
+https://groups.google.com/forum/#!topic/emscripten-discuss/63jY4CTbL6k
+https://github.com/kripken/emscripten/pull/981
+https://stackoverflow.com/questions/5902629/mmap-msync-and-linux-process-termination
+
+Ok the only solution are these:
+
+1. Change VFS such that instead of using Buffer.from and buffer constructions, that it uses the malloc from emscripten. This means all the files are actually stored on Emscripten's heap instead of in general. This also means all buffers are just views of that data on Emscripten's heap.
+2. Figure out a way to proxy the typed array or array buffer, such that writes done to the done to the emscripten heap are properly checked for mapped areas, and propagated to the underlying buffer. But this needs to be done 2-way, that is as the buffer gets changed in other ways, those changes will need to propagate back to the typed array or array buffer. But this does not work because of the fact that the buffer reference can get changed as well during writes that extend the file. This is solved from instead of mapping the underlying buffer, we map the inode plus the range. This ensures that reads and writes always come from the relevant inode. However it still doesn't solve the problem of propagating changes to the underlying file to the process address space. This could be solved with a memory manager and memory descriptor semantics, that is instead of giving each mmap of the same file a different "mmap" object, you give them the same "mmap" object.
+
+```
+MMAP AREA 1
+           \
+            INODE -> BUFFER
+           /
+MMAP AREA 2
+```
+
+If you mediate the reads and writes to each mmap area to always go through the same inode, then it should be possible for reads and writes to be communicated to each other immediately, since it's always the same thing.
+
+SO this is it, we'll need to implement a virtual memory manager by way of ES6 proxying the internal buffer some how. We'll need to do some experiments with the typed arrays and other stuff. Note that apparently propagating the memory to other processes and propagating the change to disk is apparently 2 independent flows. So it's possible for processes to see a write immediately, but also the actual page may not be written to disk yet.
+
+Oh man why does proxy of an object not work on the prototype itself. It just complains that it cannot access the typedarray buffer property.
+
+If the receiver is not used in `Relect.get`, then there's no error when accessing properties onto the prototype. It just works. But why is the receiver important, apparently it's used when you are accessing something that isn't the proxy. Like if `obj.x` is accessing x, then `obj` is the receiver, but it's not the proxy. Perhaps the receiver is used to avoid infinite recursive access. But what could it be used for elsewhere? Oh so the target may not be the receiver, most times they are the same, but sometimes they are not. So if you access via the target, that's the target that the proxy is wrapping, but the receiver is explicitly accessing the proxy again allow recursive access of the proxy. This is why it fails!?
+
+So if you use the reflect, and you use receiver, it needs to realise that the receiver is actually the prototype, and not the original object. You cannot have the receiver be the proxy when accessing the proxy.
+
+Apparently the receiver is also the `this` value. So it can also be any thing that inherits the proxy as well.
+
+So target and receiver are the not same object, however they share the same prototype. In this case, both target and receiver are instances of the wrapped target. And they share the same keys as well.
+
+```
+Reflect.getPrototypeOf(target) === Reflect.getPrototypeOf(receiver) === Reflect.getPrototypeOf(originalTarget);
+```
+
+YEP the target is the origTarget, the receiver is the proxy.
+
+Ok i'm giving up on this emscripten libgit2. I'm going to rewrite git in JS. That would be easier.
+Still this wasn't a total waste, we find out that we can use proxies on buffers too in order to create a virtual buffer. That should be pretty interesting.
+
+It's also just too many problems. Like trying to hack the heap to be a virtual memory system using ES6 proxies on typed arrays and performing bidirectional memory mapping. And really creating a soft MMU is just crazy and full of unexplored JS behaviour and performance problems. And not to mention all of the libgit2 portability problems. It looks like it will be easier to rewrite git from scratch here, but building on top of existing js implementations as well.
