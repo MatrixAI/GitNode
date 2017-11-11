@@ -1,9 +1,4 @@
-# Emscripten
-*.a
-*.o
-*.so
-*.bc
-*.ll
+/other
 
 # Logs
 logs

@@ -4,17 +4,5 @@
   with pkgs;
   stdenv.mkDerivation {
     name = "js-virtualgit";
-    buildInputs = [
-      emscripten
-      cmakeCurses
-      pkgconfig
-      python2
-      nodejs
-      nodePackages.node2nix
-      flow
-    ];
-    shellHook = ''
-      EMSCRIPTEN_ROOT_PATH='${emscripten}/share/emscripten'
-      EMSCRIPTEN='${emscripten}/share/emscripten'
-    '';
+    buildInputs = [ nodejs-8_x flow ];
   }
