@@ -18,7 +18,8 @@
     "test": "ava -v",
     "doc": "documentation build ./lib/** -f html -o ./doc",
     "rollup": "rollup --config",
-    "build": "npm test && npm run doc && npm run rollup"
+    "dos2unix": "dos2unix dist/*",
+    "build": "npm test && npm run doc && npm run rollup && npm run dos2unix"
   },
   "ava": {
     "require": "babel-register",
@@ -48,6 +49,6 @@
   },
   "dependencies": {
     "babel-runtime": "^6.26.0",
-    "virtualfs": "^2.0.0"
+    "virtualfs": "^2.0.1"
   }
 }
