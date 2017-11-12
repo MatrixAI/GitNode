@@ -8,6 +8,7 @@
     }]
   ],
   "plugins": [
+    "rewire",
     "transform-object-rest-spread",
     "transform-class-properties",
     "transform-runtime"

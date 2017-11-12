@@ -31,6 +31,7 @@
   "devDependencies": {
     "ava": "^0.19.1",
     "babel-cli": "^6.26.0",
+    "babel-plugin-rewire": "^1.1.0",
     "babel-plugin-transform-class-properties": "^6.24.1",
     "babel-plugin-transform-object-rest-spread": "^6.26.0",
     "babel-plugin-transform-runtime": "^6.23.0",
@@ -49,6 +50,7 @@
   },
   "dependencies": {
     "babel-runtime": "^6.26.0",
+    "chevrotain": "^0.34.0",
     "virtualfs": "^2.0.1"
   }
 }
