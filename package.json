@@ -39,6 +39,7 @@
     "babel-preset-flow": "^6.23.0",
     "babel-register": "^6.26.0",
     "buffer": "^5.0.8",
+    "common-tags": "^1.4.0",
     "documentation": "^5.3.3",
     "events": "^1.1.1",
     "path": "^0.12.7",
