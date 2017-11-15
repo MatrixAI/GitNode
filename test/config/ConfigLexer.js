@@ -12,13 +12,13 @@ import {
   ValueStringT,
   ValueQuotedStringT,
   lexicalGrammar
-} from '../lib/configLexer.js';
+} from '../lib/config/ConfigLexer.js';
 
 // note that stripIndent will strip all indentation until the leftmost text
 // this is important for testing whitespace capture
 
+// tokenClassName may need to be changed in the latest version
 function tokenFilter (token) {
-  // tokenClassName may need to be changed in the latest version
   return [token.image, token.tokenClassName];
 }
 
