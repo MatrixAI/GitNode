@@ -12,7 +12,7 @@ import {
   ValueStringT,
   ValueQuotedStringT,
   lexicalGrammar
-} from '../lib/config/ConfigLexer.js';
+} from '../../lib/config/ConfigLexer.js';
 
 // note that stripIndent will strip all indentation until the leftmost text
 // this is important for testing whitespace capture
