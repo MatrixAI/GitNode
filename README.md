@@ -176,3 +176,11 @@ RELATIVEGITLINK - alternative workdir is specified, use relative paths for the g
 ```
 
 We're not going to deal with these extra options, but the default set of possibilities first.
+
+---
+
+We can use embedded actions or the visitor pattern.
+
+The visitor pattern allows us to have multiple semantics for the same parser.
+
+It's also more modular.
