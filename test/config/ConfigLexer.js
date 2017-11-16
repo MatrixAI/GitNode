@@ -19,10 +19,10 @@ import {
 
 // tokenClassName may need to be changed in the latest version
 function tokenFilter (token) {
-  return [token.image, token.tokenClassName];
+  return [token.image, token.type];
 }
 
-const lexer = new Lexer(lexicalGrammar, {debug: true});
+const lexer = new Lexer(lexicalGrammar);
 
 test('section headers', t => {
   let text;
@@ -34,7 +34,7 @@ test('section headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name]
+      ['section', HeaderNameT]
     ]
   );
   text = stripIndent`
@@ -44,7 +44,7 @@ test('section headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['123', HeaderNameT.name]
+      ['123', HeaderNameT]
     ]
   );
   text = stripIndent`
@@ -54,7 +54,7 @@ test('section headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['1a2b3c', HeaderNameT.name]
+      ['1a2b3c', HeaderNameT]
     ]
   );
   text = stripIndent`
@@ -64,7 +64,7 @@ test('section headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section-name', HeaderNameT.name]
+      ['section-name', HeaderNameT]
     ]
   );
   text = stripIndent`
@@ -74,7 +74,7 @@ test('section headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section.name', HeaderNameT.name]
+      ['section.name', HeaderNameT]
     ]
   );
   // indentation is not allowed
@@ -97,8 +97,8 @@ test('subsection headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['"subsection"', HeaderSubNameT.name]
+      ['section', HeaderNameT],
+      ['"subsection"', HeaderSubNameT]
     ]
   );
   text = stripIndent`
@@ -108,8 +108,8 @@ test('subsection headers', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['"su\\n\\b \\"sub\\" s\\tub"', HeaderSubNameT.name]
+      ['section', HeaderNameT],
+      ['"su\\n\\b \\"sub\\" s\\tub"', HeaderSubNameT]
     ]
   );
   // indentation is not allowed
@@ -132,7 +132,7 @@ test('section include and includeIf header', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['include', HeaderIncludeT.name],
+      ['include', HeaderIncludeT],
     ]
   );
   text = stripIndent`
@@ -142,7 +142,7 @@ test('section include and includeIf header', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['includeIf', HeaderIncludeIfT.name],
+      ['includeIf', HeaderIncludeIfT],
     ]
   );
 });
@@ -158,9 +158,9 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['r', ValueStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['r', ValueStringT]
     ]
   );
   text = stripIndent`
@@ -171,9 +171,9 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['"r"', ValueQuotedStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['"r"', ValueQuotedStringT]
     ]
   );
   text = stripIndent`
@@ -185,11 +185,11 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v1', BodyKeyT.name],
-      ['1', ValueStringT.name],
-      ['v2', BodyKeyT.name],
-      ['2', ValueStringT.name]
+      ['section', HeaderNameT],
+      ['v1', BodyKeyT],
+      ['1', ValueStringT],
+      ['v2', BodyKeyT],
+      ['2', ValueStringT]
     ]
   );
   text = stripIndent`
@@ -200,13 +200,13 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['a', ValueStringT.name],
-      [' ', ValueSpaceT.name],
-      ['b', ValueStringT.name],
-      [' ', ValueSpaceT.name],
-      ['c', ValueStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['a', ValueStringT],
+      [' ', ValueSpaceT],
+      ['b', ValueStringT],
+      [' ', ValueSpaceT],
+      ['c', ValueStringT]
     ]
   );
   text = stripIndent`
@@ -219,15 +219,15 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['a', ValueStringT.name],
-      [' ', ValueSpaceT.name],
-      ['      ', ValueSpaceT.name],
-      ['b', ValueStringT.name],
-      [' ', ValueSpaceT.name],
-      ['      ', ValueSpaceT.name],
-      ['c', ValueStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['a', ValueStringT],
+      [' ', ValueSpaceT],
+      ['      ', ValueSpaceT],
+      ['b', ValueStringT],
+      [' ', ValueSpaceT],
+      ['      ', ValueSpaceT],
+      ['c', ValueStringT]
     ]
   );
   text = stripIndent`
@@ -240,9 +240,9 @@ test('body variable key to value', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['"a \\\n       b \\\n       c"', ValueQuotedStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['"a \\\n       b \\\n       c"', ValueQuotedStringT]
     ]
   );
 });
@@ -262,9 +262,9 @@ test('comments', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['"a \\\n       b \\\n       c"', ValueQuotedStringT.name]
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['"a \\\n       b \\\n       c"', ValueQuotedStringT]
     ]
   );
 
@@ -283,9 +283,9 @@ test('trailing whitespace', t => {
   t.deepEqual(
     result.tokens.map(tokenFilter),
     [
-      ['section', HeaderNameT.name],
-      ['v', BodyKeyT.name],
-      ['a', ValueStringT.name],
+      ['section', HeaderNameT],
+      ['v', BodyKeyT],
+      ['a', ValueStringT],
     ]
   );
 });
