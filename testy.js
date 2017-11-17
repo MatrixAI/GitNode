@@ -2,6 +2,7 @@ import fs from 'fs';
 import { Lexer } from 'chevrotain';
 import { lexicalGrammar } from './lib/config/ConfigLexer.js';
 import ConfigParser from './lib/config/ConfigParser.js';
+import interpreter from './lib/config/ConfigInterpreter.js';
 import util from 'util';
 
 const lexer = new Lexer(lexicalGrammar);
