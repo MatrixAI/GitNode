@@ -184,3 +184,10 @@ We can use embedded actions or the visitor pattern.
 The visitor pattern allows us to have multiple semantics for the same parser.
 
 It's also more modular.
+
+---
+
+TODO:
+
+1. Expand tilde for paths in git config inclusion
+2. Support conditional includes in git config

@@ -52,7 +52,7 @@
   "dependencies": {
     "babel-runtime": "^6.26.0",
     "chevrotain": "^0.35.0",
-    "glob": "^7.1.2",
+    "micromatch": "^3.1.4",
     "virtualfs": "^2.0.1"
   }
 }
