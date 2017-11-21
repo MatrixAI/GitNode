@@ -20,6 +20,19 @@ import {
   lexicalGrammar
 } from './lib/Config/ConfigLexer.js';
 
+import ConfigParser from './lib/Config/ConfigParserConcrete.js';
+
+
 const lexingResult = configLexer.tokenize(fs.readFileSync('./config', 'utf8'));
 
-console.log(lexingResult.tokens);
+const outputTokens = lexingResult.tokens.map((token) => {
+  return [token.image, token.type.tokenName];
+});
+
+fs.writeFileSync('./configtokens', JSON.stringify(outputTokens, null, 2));
+
+const parser = new ConfigParser;
+
+const parserResult = parser.execute(lexingResult.tokens);
+
+fs.writeFileSync('./configparser', JSON.stringify(parserResult, null, 2));
