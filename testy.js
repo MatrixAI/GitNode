@@ -36,3 +36,5 @@ const parser = new ConfigParser;
 const parserResult = parser.execute(lexingResult.tokens);
 
 fs.writeFileSync('./configparser', JSON.stringify(parserResult, null, 2));
+
+console.log(parserResult);
