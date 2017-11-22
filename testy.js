@@ -34,13 +34,41 @@ fs.writeFileSync('./configtokens', JSON.stringify(outputTokens, null, 2));
 const parser = new ConfigParser;
 
 const index = new Map;
-const parserResult = parser.execute(lexingResult.tokens, index);
+const tags = new WeakMap;
+const parserResult = parser.execute(lexingResult.tokens, index, tags);
 
 fs.writeFileSync('./configparser', JSON.stringify(parserResult, null, 2));
 
 console.log(parserResult);
 
 console.log([...index]);
+
+// console.log(tags);
+
+// now we have the index
+// and let's assume we are asked to get a particular value
+// section1.key1
+
+const cursor = index.get('section1.key1')[0];
+
+// this allows us to know which root CST a cursor is part of
+console.log(cursor);
+console.log(tags.has(cursor));
+console.log(tags.get(cursor));
+
+// now what we need to do is basically
+// use this cursor to get the actual value
+// we have 2 kinds of cursors here
+// section cursors
+// keyvalue cursors
+// section cursors allow us to add and remove key values
+// keyvalue cursors allow us to get and set values of a key
+// remember adding new values or removing values is about a section
+// and that section must exist already
+// removing keys/values from the section
+// in the future, moving the cursor creation into a tree indexing phase
+// so the tree created, then passed into tree visitor system
+// that produces the curtom cursors that we want to work with
 
 
 // if you do something like this
