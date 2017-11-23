@@ -59,6 +59,10 @@ console.log(tags.get(cursor));
 console.log(cursor.getKey());
 console.log(cursor.getValue());
 
+cursor.setValue('abc');
+console.log(cursor.getKey());
+console.log(cursor.getValue());
+
 // now what we need to do is basically
 // use this cursor to get the actual value
 // we have 2 kinds of cursors here
