@@ -236,3 +236,116 @@ Turns out in order to make the query use the text index you have to be explicit 
 ```
 //section[heading/text() = "S1"]/keyvalue[key/text() = "KEY"]/value/text()
 ```
+
+---
+
+The advanced storage datastructures for XML still has bad performance. It only maintains incremental updates for data that is appended. For any insert, the index performance degrades to O(n). Over time the index would become more slower due to random updates to the XML document, and eventually the index would need to be rebuilt from scratch to maintain performance.
+
+It uses basically a mapping for text tokens to stable node identifiers (auto-incremented) and a mapping from stable node identifiers to pre numbers (which indicate order), and a mapping from stable node identifiers to pointers to internal XML objects. Note that this does not directly map to the on-disk representation, since updates to the on-disk representation would change structure on each update, that would invalidate all file pointers. Basically the XML or all semi-structured on disk representations are inefficient by default, and not designed for fast random access. Note that doing this actually maintains the order between pointers which is nice, but I realised that doesn't solve the memory <-> on-disk representation mapping (which almost requires a pointer that moves with a semantic file position).
+
+In another paper, we describe a different index system. It's a hierarchal hash table. The top level is a the key specification level, which partitions nodes in the XML tree according to their key specifications. A node may match more than one key specification, then it may appear in more than one partition. The second level is the context level, which groups target nodes by their context. The third level is the key path level. The fourth level is the key value level, which groups taget nodes by equivalence classes. The equivalence classes are defined such that the nodes in a class have some key nodes which are value equivalent.
+
+Basically this becomes like a table:
+
+| Key Specification | Context | Key       | Value | Equivalence Class |
+|-------------------|---------|-----------|-------|-------------------|
+| KS1               | 0       | ISBN      | 12354 | { 1 }             |
+| KS2               | 1       | firstname | Bob   | { 2 }             |
+| KS2               | 1       | lastname  | Smith | { 2, 11 }         |
+| KS3               | 0       | @ID       | 12343 | { 2 }             |
+| KS3               | 0       | @ID       | 34253 | { 11 }            |
+
+Where there are many contexts to one KS, and many keys to 1 one context, and many values to 1 key. And then 1 equivalence class to 1 value.
+
+Context level appears to be some sort of hierarchy level in the tree. So basically at each level, there may be multiple path keys, that have different values. But these values may be equivalent to another value (I'm not sure what this means). These sets are called "key value sharing classes".
+
+The KS is `{Q, {Q', [P1...Pn]}}`. Where Q is the context path, Q' the target path, and Ps are key paths. The context path identifies a set of nodes, each of which we refer to as a context node. For each context node, the key constraint must hold on the target set. An example of this is `{e, {book, {ISBN}}}`. This shows a book that is uniquely identified by the ISBN within the whole tree. Also: `{book, {_*.author, {firstname, lastname}}}` which shows that authors for a given book can be distinguished by their firstnames and lastnames. So `_` is a wildcard matching any label, while `_*` is a wildcard matching zero or more labels. It shows that the latter KS is a relative KS. So this can refer to any book node in the XML tree.
+
+This key specification does not uniquely identify a node. Instead there may be multiple books with authors that are matched by KS1. So if we give the actual specific ISBNs, then we can match specific books with specific ISBNs, but still what if multiple books have the same ISBN. Then you have to specify something with more constraints. That would be asking for the firstname and lastname. Still at the end, there may be books with the same firstnames and lastnames.
+
+Note that all the nodes when indexed have a document ordering number assigned to them. So the actual equivalence class number is attached to those.
+
+Alternative to this is the usage of node descriptor table and using standard relational indexing like btrees to index the node descriptor table. But this doesn't deal with updates or document order queries or optimising the tradeoff to updates of the preorder number.
+
+Last paper to read: http://www.vldb.org/pvldb/vol8/p986-finis.pdf
+
+Containment labelling schemes includes Nested Intervals, Dyn-NI... etc. These label each node with a `[lower, upper]` interval or a similar combination of values. As the term "nested" alludes to, their main property is that a node's inteval is nested in the interval of its parent node. Queries can be answered by testing the intervales of the involved nodes for containment relationships. A variation of this is pre and post scheme where each node is lavelled with its pre and post order ranks. Plain nested interval and pre/post have similar, limited query capabilities. For example we cannot test the important `is_child` predicate because neither scheme allows us t o compute the distance between a node and an ancestor.
+
+Considering updates, the mentioned schemes are staic, their fundamental problem is that each insertion or deletion requires relabeling O(n) labels on average as all interval bounds behind a newly inserted bound have to be shifted to make space. To avoid relabeling, the main idea was to use gaps, so several schemes use gaps in between labels. But they are all limited by the gap size. It has been proved that the cost of relabeling is traded for a potentially unbounded label size. That is any scheme which does not relabel existing labels upon insertion, an insertion sequence of length n exists that yields labels of size Omega(n) (lower bound). (E.Cohen Kaplan Milo, Labelling dynamic XML trees). Nested intervals are fundamentally limited in their update capabilities.
+
+Alternative to this is path based labelling schemes which encode the path from the root down to the node into the label. Basically `1.2` means the first node, and the second node of the first. This is called the Dewey scheme. The dewey encoding is derived from the dewey decimal system. And it gives implicit ordering to the tree in document order. It appears that the interval encoding of trees also gives a similar idea to the span in opentracing, as if a span is an interval encoding of contexts in which traces/or log events occur. Thus each initial log even represents a child to a tree node, and subsequent contexts can be opened at each level to give an extra categorisation to these log events. That means for opentracing there are 2 ways to think of log events, as both time ordered events, and as a tree. In fact the tree gives more data, since an pre-ordered traversal over the tree would give a time ordered events. But this doesn't address concurrent events. In which case you would have to create a multidimensional tree, which represents concurrent spans as concurrent intervals. Intervals that don't have a defined order relative to each other. Both dewey encoding (path encoding) or interval encoding (nested intervals) can then be represented on disk or as a table of values. And of course there are adjacency lists and explicit pointers in an object database. That gives us 4 naive ways of representing trees. Adjacency list, explicit pointers, dewey encoding, or interval encoding. Weird how the index and the backing data structure is some times the same thing. Kind of like how hashtables is a backing data structure, but the indexing of it is implicit. Thus an index is a model of the original structure designed around particular query and update operations. Sometimes updating the original structure is easy but difficult for the index, while othertimes it's the otherway around.
+
+Indexes are models: a B-Tree-Index can be seen as a model to map a key to the position of a record within a sorted array, a Hash-Index as a model to map a key to a position of a record within an unsorted array, and a BitMap-Index as a model to indicate if a data record exists or not. In this exploratory research paper, we start from this premise and posit that all existing index structures can be replaced with other types of models, including deep-learning models, which we term learned indexes. The key idea is that a model can learn the sort order or structure of lookup keys and use this signal to effectively predict the position or existence of records. - https://arxiv.org/abs/1712.01208
+
+Ok now onto index based schemes. This means the data is different from the actual index scheme itself which is a separate data structure!
+
+Looks like this is a more cleaned up version of the original paper: https://link.springer.com/article/10.1007/s00778-016-0436-3
+
+"Order Indexes: supporting highly dynamic hierarchical data in relational main-memory database systems" - February 2017. But no downloads unless subscribed to springerlink.
+
+Best survey over XML and Semistructured Data Querying: http://delivery.acm.org/10.1145/3100000/3095798/a64-baca.pdf?ip=202.171.181.68&id=3095798&acc=OPEN&key=4D4702B0C3E38B35%2E4D4702B0C3E38B35%2E4D4702B0C3E38B35%2E6D218144511F3437&CFID=839670274&CFTOKEN=32876084&__acm__=1513078294_a098f14a4df827e9723e7eb001ad47b9 It even mentions arangodb and mentions the previous order indexing system. They also mention a Delta-NI by the same system. Order trees subsume it when you don't need versions.
+
+So we have a table like:
+
+| ID | Key | Level | Lower | Upper |
+|----|-----|-------|-------|-------|
+| 0  | A   | 0     | ..... | ..... |
+| 1  | B   | 1     | ..... | ..... |
+
+The lower and upper are pointers into an order index.
+
+This data structure can be created using a multikeyed multivalued bimap.
+
+Conceptually the order index is a tree, represented by nested intervals. Such that the root node would be something like `[0` and `]0`. This means an opening and closing of interval of 0. Child nodes are then linked (bidirectionally) and with an increment in the interval number. Siblings on the same level also have an interval number, but they are ofset but all the left child nodes. Note that the level number is their interval number.
+
+The index structure provide these functions:
+
+```
+l is backlink
+e is entry in order index
+
+find(l) -> e
+rid(e) -> id of e's associated row
+lower(e) -> whether e is a lower bound
+before(e1, e2) - whether e1 is before e2 in entry order
+next(e) -> next entry in entry order
+ajdust_level(e) - level adjustment for e
+
+
+```
+
+Each index entry would store the rid that points back to each row or just the rid identifier which has to be mediated via a container.
+
+The `adjust_level`, `find` and `before` differs among the 3 implementations AOTree, BOTree and OList.
+
+Wait how does insert leaf work here when inserting in the middle? Is it done via inserting adjacent and the relocating it somewhere?
+
+I don't understand how the opening and closing are connected to each other or how the nested interval system works.
+
+Level adjustments this seems the most problematic issue I don't understand. It enables us to maintain level information dynamically. Adjust level is always added to the level stored in the table row. This way we avoid having to alter the table in case of range relocation; rather we update the level adjustment of the relocated range. To do this efficiently we reuse a technique we originally applied in DeltaNI: accumulation. The idea is to store a block level with each block. The level adjustment of an entry e is obtained by summing up the levels of all blocks on the path to the root block. This allows us to efficiently alter levels during a range relocation. After cropping the bound range `[a,b]`, we add the desired level delta `d` to the block level of the root blocks of that range, which effectively adds `d` to the levels of all entries within `[a, b]`. Accumulation brings along the cost that `level(a)` becomes linear in the height of the data structure. During an index scan, the level adjustment can be tracked and needs to be refreshed only when a new block starts. This yields amortized constant time for `level`. So this adjustment is kind of lazy then?
+
+If we can see an implementation of this.
+
+AO-Tree is using the self-balancing AVL tree. Maybe we should first try to understand this first.
+
+Explicit parent pointers are maintained. The required algorithms navigate from bottom to the root. The `adjust_level` function sums up all the block levels on the path from an entry to the root.
+
+LEVEL means the number of hops from root to the current node. That's what it means. Whereas the lower and upper nested interval numbers is actually flipped since the root of this tree is at the bottom when visualised as a flipped nested interval encoding of a tree. So that must mean the block level is added to the level inside the table to represent some sort of final level? The delta ni mentions the idea of an accumulation tree that accumulates a "true" key from the bottom to the root. Apparently nested intervals generalise nested sets (and zippers generalise gap buffers). They are immune to hierarchy reorganisation problems. They allow answering ancestor path hierarchal queries algorithmically without storing the hierarchy relation.
+
+Nested sets are generalised by nested intervals. And there are variants and extensions on this.
+
+Materialised paths or sometimes called dewey encoding is like unix filepaths. And there are extensions to this, indexes that use this are often called path indexing.
+
+Closure table represents what exactly? Kind of reminds of an adjacency table or an adjacency matrix, but offset from the main data. Is it just a secondary adjacency matrix? Secondary adjacency list, since the system does not represent a matrix.
+
+Also matrix encodings as well.
+
+Also succinct encodings which often take advantage of some sort binary or mathematical pattern. Like how fenwick trees are stored as just an array of numbers. Their properties are often implicit based on their position and value.
+
+Ok let's try to understand nested intervals again.
+
+Ok so nested sets was simple as just each node is given 2 numbers where the number is arrived after a pre-order and post-order traversal. As you enter, you increment an opening number, and as you leave the node you also give it the closing number. In order to solve the insertion performance problem, you can use gaps. Which means instead of incrementing it just by 1, you increment it by a gap size. Then upon filling the gap, you need to patch this with a gap shifting or total gap reset strategy. This was later improved by using the nested interval strategy which instead uses rational numbers expressed as quotients. I'm not sure whether the nested intervals here is the same nested intervals in the main paper!?
+
+Joe Celko first proposed nested sets. It appears that Vadim Tropashko first proposed nested intervals. This was later extended by Dan Hazel in 2008 using rational numbers. Comments about this approach: https://news.ycombinator.com/item?id=13517490
+
+So this is the most recent work on nested intervals: https://arxiv.org/pdf/0806.3115.pdf
