@@ -349,3 +349,39 @@ Ok so nested sets was simple as just each node is given 2 numbers where the numb
 Joe Celko first proposed nested sets. It appears that Vadim Tropashko first proposed nested intervals. This was later extended by Dan Hazel in 2008 using rational numbers. Comments about this approach: https://news.ycombinator.com/item?id=13517490
 
 So this is the most recent work on nested intervals: https://arxiv.org/pdf/0806.3115.pdf
+
+The nested intervals system presented by Dan Hazel do not appear to be used by the order index structure. In fact it's never referenced. However the order index paper authors are aware about the use of dynamic nested intervals via the use of gaps, floating point numbers and variable length records. However it appears they decided to stick to using gap nested intervals. This means it's no different from nested sets with gaps. The gaps can be selected wit the gap fill strategy, that is basically gap shift or a total gap reset. However the rational method is also very interesting, however there is one point of confusion, the way the rational keys need to have a matrix multiplication applied to the subtree movement with complexity based on the size of the subtree. However order index does it's own subtree movement which I think is not based on the size of the subtree, but I'm curious how even a GapNI would be done without resetting the subtree nodes.
+
+One particular encoding of rational numbers in the older literature is called dyadic rational numbers. Vadim admits that nested intervals allow a certain freedom in choosing a particular encoding scheme. He also developed an encoding with farey fractions. The paper then demonstrates a maping between dyadic rational numbers and farey fractionals. I suppose Dan Hazel improved on these using his method.
+
+W-BOX[19] uses gaps but tries to relabel only locally using weight-balanced B tree.
+Nested Tree[22] uses a nested series of nested interval schemes to relabel only parts of the hierarchy during an update and is therefore comparable to gap-based schemes.
+QRS[1] encoding based on floating point number pairs.
+Variable-length QED[12]
+Variable-length CDBS[12]
+Variable-length CDQS[12]
+Excel[16] is similar to CDBS.
+Cohen[6] proved that any labelling scheme that is not allowed to relabel existing labels upon insertion, there will be a larger potentially unbounded label size.
+Gap-based[15] - suggest to preallocate gaps in between interval bounds
+
+It also says that "Subtree and range updates of size s always require all s labels to be altered". So since all containment based schemes suffer from the problems P2 and P3, their use in highly dynamic setting is limited. This is talking about gap based models, which is the same in the case of rational keying.
+
+For example, GapNI in Fig. 1 is able to
+insert a parent node K above D, E, and F by assigning it the
+bounds [350, 950]. However, as soon as the node level [2] or
+its parent [16] (Dyn-NI-Parent and Dyn-NI-Level in Fig. 6)
+are to be tracked explicitly—which is necessary for many
+queries (P1)—the inner node update turns expensive, as
+the parent of all c children of K (D, E, and F) or the levels
+of all s descendants change. Subtree and range updates of
+size s always require all s labels to be altered.
+
+Ok so for gap based schemes, you have omega children size for explicit parent pointers. And you have omega subtree size for level adjustment. And als osubtree updates always requires omega subtree size for moving from one subtree to another, because the interval that you're in is moving to a different bound.
+
+With the usage of rational keys, you can always work out your next sibling, (extend it easily), work out your parent, and work out your children. However yes you also have the same problem with explicit level (since I don't think you can constant time work out level)... WAIT maybe you can constant time work out the level of anywhere you are. Maybe some sort of matrix manipulation. It's a loop of multiplication until the end, it is surely faster. And with parent pointers, that shouldn't be necessary, since you can always work out your parent. So explicit parent pointers are not necessary!!! Oh shit that might even be better than any schemes he's got right now!
+
+B-Box[19] uses keyless B+trees. It derived BO-Tree. No need for level information and parent information. Parent information can be figured out direcly from rational keys. Not sure about level information except for loads of matrix calculations. It looks like it would be constant time to when the numerator goes down to 0 and when the denominator goes down to 0. So several matrix calculations, then it works, hence no need to store level information. This is better then maintaining level information for each node and requiring updates Omega(s) of the subtree size upon update, since it's always calculated when you need it. That being said caching it into the node can be useful for queries, if the calculation does take some time. I have a feeling the calculation will be a VERY fast computational loop.
+
+Ok so I got the vectorious library and we can try try implementing it all using vectorious. Also note that on desktop we use `node-gyp` which is used to compile `nblas`. On browsers this will obviously not be available, but the vectorious automatically optimises when blas is available and still works when it doesn't exist. So we should still be good. I don't exactly know how rollup will deal with these extra libraries however. I hope the require call of nblas will just be ignored. Also I may move this data structure system to another npm package, so be composable, and this virtualgit will just load it in.
+
+So first we need to build the rationals from the rational keying system. Just a double table first so we can index by everything.
