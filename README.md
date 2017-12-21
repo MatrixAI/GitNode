@@ -385,3 +385,19 @@ B-Box[19] uses keyless B+trees. It derived BO-Tree. No need for level informatio
 Ok so I got the vectorious library and we can try try implementing it all using vectorious. Also note that on desktop we use `node-gyp` which is used to compile `nblas`. On browsers this will obviously not be available, but the vectorious automatically optimises when blas is available and still works when it doesn't exist. So we should still be good. I don't exactly know how rollup will deal with these extra libraries however. I hope the require call of nblas will just be ignored. Also I may move this data structure system to another npm package, so be composable, and this virtualgit will just load it in.
 
 So first we need to build the rationals from the rational keying system. Just a double table first so we can index by everything.
+
+---
+
+Ok I understand it now. Now to implement the BOTree version. We'll need to addres the gapping and the BOTree blocks. We don't actually need the numbers in the blocks right? I think we do. They will also store the stable node identifiers. And these stable node identifiers never change. In the future I wonder if DeltaNI can be used for versioned data as well. And perhaps then applying it to general graphs.
+
+---
+
+Ok let's implement BO-Tree.
+
+We first need to create something that can store the table structure, allow indexing of the RID. That's it. There's no other features right?
+
+Other things may then index the RID record with with text tokens or whatever else. Not sure about path tokens.
+
+Then there's also the fact that are we indexing the actual RID number, or something else? Like the pointer to the table object. But then we need a collection to maintain pointers to them. It makes sense that we need to do this.
+
+So we extend a straight map to do this?

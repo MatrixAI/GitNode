@@ -4,5 +4,5 @@
   with pkgs;
   stdenv.mkDerivation {
     name = "js-virtualgit";
-    buildInputs = [ nodejs-8_x nodePackages.node-gyp blas flow ];
+    buildInputs = [ nodejs-8_x nodePackages_6_x.node-gyp blas flow ];
   }
